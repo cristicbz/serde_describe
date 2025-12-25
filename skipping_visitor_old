@@ -1,0 +1,108 @@
+
+pub struct SkippingVisitor<VisitorT> {
+    visitor: VisitorT,
+}
+
+macro_rules! forward_visit {
+    ($($fn_name:ident($($value_type:ty)?),)+) => {
+        $(
+            forward_visit! { @single, $fn_name, $(v, $value_type)? }
+        )+
+    };
+    (@single, $fn_name:ident, $($value:ident, $value_type:ty)?) => {
+        #[inline]
+        fn $fn_name<E>(self, $( $value: $value_type)?) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visitor.$fn_name($($value)?).map(Some)
+        }
+    };
+}
+
+impl<'de, VisitorT> serde::de::Visitor<'de> for SkippingVisitor<VisitorT>
+where VisitorT: serde::de::Visitor<'de>
+{
+    type Value = Option<VisitorT::Value>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.visitor.expecting(formatter)
+    }
+
+    forward_visit! {
+        visit_bool(bool),
+        visit_i8(i8),
+        visit_i16(i16),
+        visit_i32(i32),
+        visit_i64(i64),
+        visit_i128(i128),
+        visit_u8(u8),
+        visit_u16(u16),
+        visit_u32(u32),
+        visit_u64(u64),
+        visit_u128(u128),
+        visit_f32(f32),
+        visit_f64(f64),
+        visit_char(char),
+        visit_str(&str),
+        visit_borrowed_str(&'de str),
+        visit_string(String),
+        visit_bytes(&[u8]),
+        visit_byte_buf(Vec<u8>),
+        visit_none(),
+        visit_unit(),
+    }
+
+    #[inline]
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.visitor.visit_some(deserializer).map(Some)
+    }
+
+    #[inline]
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.visitor.visit_newtype_struct(deserializer).map(Some)
+    }
+
+    #[inline]
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        self.visitor.visit_seq(seq).map(Some)
+    }
+
+    #[inline]
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        self.visitor.visit_map(map).map(Some)
+    }
+
+    #[inline]
+    fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        self.visitor.visit_enum(data).map(Some)
+    }
+
+    #[inline]
+    fn visit_borrowed_bytes<E>(self, value: &'de [u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.as_ptr().addr() == SPECIAL_SKIP_BYTES.as_ptr().addr() {
+            Ok(None)
+        } else {
+            self.visitor.visit_borrowed_bytes(value).map(Some)
+        }
+    }
+}
+

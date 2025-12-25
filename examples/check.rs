@@ -1,4 +1,5 @@
 use bincol::Described;
+use itertools::sorted;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
@@ -53,48 +54,38 @@ enum Untagged {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
-struct Value(Vec<Untagged>);
+struct Value<T>(T);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Simple {
+    a: Option<u32>,
+}
 
 fn main() {
-    //let value = vec![
-    //    C {
-    //        x: None,
-    //        y: Vec::new(),
-    //    },
-    //    C {
-    //        x: Some((1, 2)),
-    //        y: vec![D { z: None, w: None }],
-    //    },
-    //    //C {
-    //    //    x: Some((1, 2)),
-    //    //    y: vec![D { z: None, w: None }],
-    //    //},
-    //];
-    let original = Value(vec![
-        Untagged::U32(10),
-        Untagged::F32(0.5),
-        Untagged::OptionU32(Some(10)),
-        Untagged::OptionE(Some(E(20))),
-        Untagged::OptionE(None),
-        Untagged::F(F(None)),
-        Untagged::F(F(Some(30))),
-    ]);
-    eprintln!("ORIGINAL:\n{:#?}\n\n", original);
+    let mut value = Value(vec![Simple { a: None }, Simple { a: Some(10) }]);
+    //let original = Value(vec![
+    //    Untagged::U32(10),
+    //    Untagged::F32(0.5),
+    //    Untagged::OptionU32(Some(10)),
+    //    Untagged::OptionE(Some(E(20))),
+    //    Untagged::OptionE(None),
+    //    Untagged::F(F(None)),
+    //    Untagged::F(F(Some(30))),
+    //]);
+    eprintln!("ORIGINAL:\n{:#?}\n\n", value);
     eprintln!(
         "DESCRIBED:\n{}\n\n",
         ron::ser::to_string_pretty(
-            &Described(&original),
+            &Described(&value),
             PrettyConfig::default()
                 .struct_names(true)
                 .number_suffixes(true)
         )
         .unwrap()
     );
-    let serialized = bitcode::serialize(&Described(original)).unwrap();
-    eprintln!(
-        "DESERIALIZED:\n{:#?}\n\n",
-        bitcode::deserialize::<Described<Value>>(&serialized)
-            .unwrap()
-            .0,
-    );
+    let serialized = bitcode::serialize(&Described(value)).unwrap();
+    value = bitcode::deserialize::<Described<Value<_>>>(&serialized)
+        .unwrap()
+        .0;
+    eprintln!("DESERIALIZED:\n{:#?}\n\n", value,);
 }
