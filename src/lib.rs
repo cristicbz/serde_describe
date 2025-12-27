@@ -1,6 +1,11 @@
+// TODO: Add Option<FieldListIndex>, Option<FieldListIndex> or so for with/without to
+// TraceNode::{Struct, StructVariant}, then use that in `check` to match unions.
+//
+//
 use indexmap::{Equivalent, IndexSet};
 use itertools::Itertools;
 use serde::{
+    Deserialize, Serialize,
     de::{
         DeserializeSeed, Deserializer, EnumAccess, Error as _, Expected, IgnoredAny, MapAccess,
         SeqAccess, Unexpected, VariantAccess,
@@ -9,12 +14,11 @@ use serde::{
         Error as _, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
         SerializeTuple, SerializeTupleStruct, SerializeTupleVariant, Serializer,
     },
-    Deserialize, Serialize,
 };
 use std::{cell::Cell, fmt::Debug, hash::Hash, marker::PhantomData, ops::Index, sync::LazyLock};
 use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 enum SchemaBuilder {
     Bool,
 
@@ -37,7 +41,6 @@ enum SchemaBuilder {
     String,
     Bytes,
 
-    Skip,
     OptionNone,
     OptionSome(Box<SchemaBuilder>),
 
@@ -54,6 +57,8 @@ enum SchemaBuilder {
         name: Option<TypeName>,
         field_names: Option<NameListIndex>,
         field_types: Vec<SchemaBuilder>,
+        with_lists: Vec<FieldListIndex>,
+        without_lists: Vec<Option<FieldListIndex>>,
         length: u32,
     },
 }
@@ -93,12 +98,16 @@ impl SchemaBuilder {
                     name: left_name,
                     field_names: left_field_names,
                     field_types: left_field_types,
+                    with_lists: left_with_lists,
+                    without_lists: left_without_lists,
                     length: left_length,
                 },
                 SchemaBuilder::Record {
                     name: right_name,
                     field_names: right_field_names,
                     field_types: right_field_types,
+                    with_lists: right_with_lists,
+                    without_lists: right_without_lists,
                     length: right_length,
                 },
             ) => {
@@ -109,12 +118,20 @@ impl SchemaBuilder {
                         .iter_mut()
                         .zip(right_field_types)
                         .for_each(|(left, right)| left.union(right));
+                    left_with_lists.extend(right_with_lists);
+                    left_with_lists.sort_unstable();
+                    left_with_lists.dedup();
+                    left_without_lists.extend(right_without_lists);
+                    left_without_lists.sort_unstable();
+                    left_without_lists.dedup();
                     Ok(())
                 } else {
                     Err(SchemaBuilder::Record {
                         name: right_name,
                         field_names: right_field_names,
                         field_types: right_field_types,
+                        with_lists: right_with_lists,
+                        without_lists: right_without_lists,
                         length: right_length,
                     })
                 }
@@ -226,19 +243,16 @@ pub enum Schema {
     Struct(NameIndex, NameListIndex, SchemaListIndex),
     StructVariant(NameIndex, NameIndex, NameListIndex, SchemaListIndex),
 
+    StructWithout(SchemaIndex, FieldListIndex),
+    StructWith(SchemaIndex, FieldListIndex),
     Union(SchemaListIndex),
-    Skip,
 }
 
 macro_rules! u32_indices {
     ($($index_ty:ident => $error:ident,)+) => {
         $(
             #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-            pub struct $index_ty(nonmax::NonMaxU32);
-
-            impl $index_ty {
-                pub const RESERVED: $index_ty = $index_ty(nonmax::NonMaxU32::new(u32::MAX - 1).unwrap());
-            }
+            pub struct $index_ty(u32);
 
             impl From<$index_ty> for u32 {
                 #[inline]
@@ -259,22 +273,17 @@ macro_rules! u32_indices {
 
                 #[inline]
                 fn try_from(value: usize) -> Result<Self, Self::Error> {
-                    u32::try_from(value)
-                        .ok()
-                        .and_then(nonmax::NonMaxU32::new)
-                        .map($index_ty)
-                        .ok_or(SerError::$error)
+                    match u32::try_from(value) {
+                        Ok(value) => Ok($index_ty(value)),
+                        Err(_) => Err(Self::Error::$error)
+                    }
                 }
             }
 
-            impl TryFrom<u32> for $index_ty {
-                type Error = SerError;
-
+            impl From<u32> for $index_ty {
                 #[inline]
-                fn try_from(value: u32) -> Result<Self, Self::Error> {
-                    nonmax::NonMaxU32::new(value)
-                        .map($index_ty)
-                        .ok_or(SerError::$error)
+                fn from(value: u32) -> Self {
+                    $index_ty(value)
                 }
             }
         )+
@@ -283,6 +292,8 @@ macro_rules! u32_indices {
 u32_indices! {
     SchemaIndex => TooManySchemas,
     SchemaListIndex => TooManySchemaLists,
+    FieldListIndex => TooManyFields,
+    FieldIndex => TooManyFields,
     NameIndex => TooManyNames,
     NameListIndex => TooManyNameLists,
     TraceIndex => TooManyValues,
@@ -394,13 +405,19 @@ pub fn zigzag128_decode(value: u128) -> i128 {
 
 #[derive(Debug, Error)]
 pub enum SerError {
-    #[error("too many nodes for u32")]
+    #[error("too many schemas for u32")]
     TooManySchemas,
 
-    #[error("too many node lists for u32")]
+    #[error("too many schema lists for u32")]
     TooManySchemaLists,
 
-    #[error("too many structs for u32")]
+    #[error("too many field skip lists for u32")]
+    TooManySkipLists,
+
+    #[error("too many fields for u32")]
+    TooManyFields,
+
+    #[error("too many names for u32")]
     TooManyNames,
 
     #[error("too many field lists for u32")]
@@ -433,6 +450,7 @@ struct RootSchemaBuilder {
     name_lists: Pool<Box<[NameIndex]>, NameListIndex>,
     schemas: Pool<Schema, SchemaIndex>,
     schema_lists: Pool<Box<[SchemaIndex]>, SchemaListIndex>,
+    field_index_lists: Pool<Box<[FieldIndex]>, FieldListIndex>,
     root: SchemaBuilder,
 }
 
@@ -541,8 +559,7 @@ impl RootSchema {
             | Schema::Char
             | Schema::String
             | Schema::Bytes
-            | Schema::Skip => eprintln!("{indent}::{schema:?},"),
-            Schema::Unit => eprintln!("{indent}(),"),
+            | Schema::Unit => eprintln!("{indent}(),"),
             Schema::OptionNone => eprintln!("{indent}::Option::None"),
 
             Schema::UnitStruct(name) => eprintln!("{}{},", indent, self.name(name)?),
@@ -670,7 +687,6 @@ impl SchemaBuilder {
             SchemaBuilder::String => Schema::String,
             SchemaBuilder::Bytes => Schema::Bytes,
 
-            SchemaBuilder::Skip => Schema::Skip,
             SchemaBuilder::OptionNone => Schema::OptionNone,
             SchemaBuilder::OptionSome(inner) => {
                 let inner = inner.build(root)?;
@@ -690,47 +706,132 @@ impl SchemaBuilder {
             }
             SchemaBuilder::Map(key, value) => Schema::Map(key.build(root)?, value.build(root)?),
             SchemaBuilder::Sequence(item) => Schema::Sequence(item.build(root)?),
-            SchemaBuilder::Union(schemas) => {
-                let mut schemas = schemas
-                    .into_iter()
-                    .map(|schema| schema.build(root))
-                    .collect::<Result<Vec<_>, _>>()?;
-                schemas.sort_unstable();
-                schemas.dedup();
-                Schema::Union(root.schema_lists.intern_from(schemas)?)
+            SchemaBuilder::Union(builders) => {
+                let mut built = Vec::with_capacity(builders.len());
+                Self::expand_union(root, builders, &mut built)?;
+                Schema::Union(root.schema_lists.intern_from(built)?)
             }
             SchemaBuilder::Record {
                 name,
                 field_names,
                 field_types,
+                with_lists,
+                without_lists,
                 length,
             } => {
-                let field_types = field_types
-                    .into_iter()
-                    .map(|schema| schema.build(root))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let field_types = root.schema_lists.intern_from(field_types)?;
-                match (name, field_names) {
-                    (None, None) => Schema::Tuple(length, field_types),
-                    (Some(TypeName(name, None)), None) => {
-                        Schema::TupleStruct(name, length, field_types)
-                    }
-                    (Some(TypeName(name, Some(variant))), None) => {
-                        Schema::TupleVariant(name, variant, length, field_types)
-                    }
-                    (None, Some(_field_names)) => {
-                        unreachable!("anonymous structs don't exist in rust!")
-                    }
-                    (Some(TypeName(name, None)), Some(field_names)) => {
-                        Schema::Struct(name, field_names, field_types)
-                    }
-                    (Some(TypeName(name, Some(variant))), Some(field_names)) => {
-                        Schema::StructVariant(name, variant, field_names, field_types)
-                    }
+                let mut built = Vec::with_capacity(if field_names.is_some() {
+                    with_lists.len() + without_lists.len()
+                } else {
+                    1
+                });
+                Self::expand_record(
+                    root,
+                    name,
+                    field_names,
+                    field_types,
+                    with_lists,
+                    without_lists,
+                    length,
+                    &mut built,
+                )?;
+                if let Some(&first) = built.first()
+                    && built.len() == 1
+                {
+                    return Ok(first);
+                } else {
+                    Schema::Union(root.schema_lists.intern_from(built)?)
                 }
             }
         };
         root.schemas.intern(schema)
+    }
+
+    fn expand_union(
+        root: &mut RootSchemaBuilder,
+        builders: Vec<SchemaBuilder>,
+        built: &mut Vec<SchemaIndex>,
+    ) -> Result<(), SerError> {
+        for builder in builders {
+            match builder {
+                SchemaBuilder::Union(subunion) => Self::expand_union(root, subunion, built)?,
+                SchemaBuilder::Record {
+                    name,
+                    field_names,
+                    field_types,
+                    with_lists,
+                    without_lists,
+                    length,
+                } => Self::expand_record(
+                    root,
+                    name,
+                    field_names,
+                    field_types,
+                    with_lists,
+                    without_lists,
+                    length,
+                    built,
+                )?,
+                builder => built.push(builder.build(root)?),
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_record(
+        root: &mut RootSchemaBuilder,
+        name: Option<TypeName>,
+        field_names: Option<NameListIndex>,
+        field_types: Vec<SchemaBuilder>,
+        with_lists: Vec<FieldListIndex>,
+        without_lists: Vec<Option<FieldListIndex>>,
+        length: u32,
+        built: &mut Vec<SchemaIndex>,
+    ) -> Result<(), SerError> {
+        let field_types = field_types
+            .into_iter()
+            .map(|schema| schema.build(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        let field_types = root.schema_lists.intern_from(field_types)?;
+        let struct_schema = match (name, field_names) {
+            (None, None) => Schema::Tuple(length, field_types),
+            (Some(TypeName(name, None)), None) => Schema::TupleStruct(name, length, field_types),
+            (Some(TypeName(name, Some(variant))), None) => {
+                Schema::TupleVariant(name, variant, length, field_types)
+            }
+            (None, Some(_field_names)) => {
+                unreachable!("anonymous structs don't exist in rust!")
+            }
+            (Some(TypeName(name, None)), Some(field_names)) => {
+                Schema::Struct(name, field_names, field_types)
+            }
+            (Some(TypeName(name, Some(variant))), Some(field_names)) => {
+                Schema::StructVariant(name, variant, field_names, field_types)
+            }
+        };
+        let struct_schema = root.schemas.intern(struct_schema)?;
+
+        if field_names.is_none() {
+            built.push(struct_schema);
+            return Ok(());
+        }
+        for with_list in with_lists {
+            built.push(
+                root.schemas
+                    .intern(Schema::StructWith(struct_schema, with_list))?,
+            );
+        }
+
+        for without_list in without_lists {
+            if let Some(without_list) = without_list {
+                built.push(
+                    root.schemas
+                        .intern(Schema::StructWithout(struct_schema, without_list))?,
+                );
+            } else {
+                built.push(struct_schema);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -892,7 +993,6 @@ pub enum Trace {
     String,
     Bytes,
 
-    Skip,
     OptionNone,
     OptionSome,
 
@@ -912,6 +1012,8 @@ pub enum Trace {
 
     Struct,
     StructVariant,
+
+    Skip,
 }
 
 impl Trace {
@@ -932,7 +1034,6 @@ impl Trace {
         Self::Char,
         Self::String,
         Self::Bytes,
-        Self::Skip,
         Self::OptionNone,
         Self::OptionSome,
         Self::Unit,
@@ -947,6 +1048,7 @@ impl Trace {
         Self::TupleVariant,
         Self::Struct,
         Self::StructVariant,
+        Self::Skip,
     ];
 }
 
@@ -1173,6 +1275,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
             reserved_field_name_list: self.reserve_u32()?,
             field_names: Vec::with_capacity(len),
             field_types: Vec::with_capacity(len),
+            skip_list: Vec::new(),
             parent: self,
         })
     }
@@ -1191,6 +1294,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
             reserved_field_name_list: self.reserve_u32()?,
             field_names: Vec::with_capacity(len),
             field_types: Vec::with_capacity(len),
+            skip_list: Vec::new(),
             parent: self,
         })
     }
@@ -1300,6 +1404,8 @@ impl SerializeTuple for TupleSchemaBuilder<'_> {
             field_names: None,
             field_types: self.schemas,
             length: self.length,
+            with_lists: Vec::new(),
+            without_lists: Vec::new(),
         })
     }
 }
@@ -1345,6 +1451,7 @@ struct StructSchemaBuilder<'a> {
     reserved_field_name_list: TraceIndex,
     field_names: Vec<NameIndex>,
     field_types: Vec<SchemaBuilder>,
+    skip_list: Vec<FieldIndex>,
     parent: &'a mut RootSchemaBuilder,
 }
 
@@ -1365,8 +1472,9 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
 
     #[inline]
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
+        self.skip_list.push(self.field_names.len().try_into()?);
         self.field_names.push(self.parent.intern_field_name(key)?);
-        self.field_types.push(SchemaBuilder::Skip);
+        self.field_types.push(SchemaBuilder::default());
         self.parent.push_trace(Trace::Skip);
         Ok(())
     }
@@ -1374,6 +1482,30 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
     #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
         let length = u32::try_from(self.field_names.len()).map_err(|_| SerError::TooManyValues)?;
+        let (with_lists, without_lists) = if self.skip_list.is_empty() {
+            (Vec::new(), vec![None])
+        } else if self.skip_list.len() < self.field_names.len() / 2 {
+            (
+                Vec::new(),
+                vec![Some(
+                    self.parent
+                        .field_index_lists
+                        .intern(self.skip_list.into())?,
+                )],
+            )
+        } else {
+            let mut with_list = Vec::with_capacity(self.field_names.len() - self.skip_list.len());
+            let mut i_field = 0u32;
+            for FieldIndex(skip) in self.skip_list {
+                with_list.extend((i_field..skip).map(FieldIndex));
+                i_field = (skip + 1).max(i_field);
+            }
+            with_list.extend((i_field..length).map(FieldIndex));
+            (
+                vec![self.parent.field_index_lists.intern(with_list.into())?],
+                Vec::new(),
+            )
+        };
         let field_names = Some(
             self.parent
                 .fill_reserved_field_name_list(self.reserved_field_name_list, self.field_names)?,
@@ -1382,6 +1514,8 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
             name: Some(self.name),
             field_names,
             field_types: self.field_types,
+            with_lists,
+            without_lists,
             length,
         })
     }
@@ -1563,21 +1697,10 @@ impl<'a> ValueCursor<'a> {
         let name_list = self.root.name_list(name_list).unwrap();
         let schema_length = schema_list.len();
         assert_eq!(name_list.len(), schema_length);
-        let actual_length = todo!();
 
         let mut serializer = serializer.serialize_tuple(schema_length)?;
         for &schema in schema_list {
-            let child = self.pop_child(schema);
-            match child
-                .check()
-                .expect("schema-trace mismatch in field serialization")
-            {
-                CheckResult::Simple => serializer.serialize_element(&child)?,
-                CheckResult::Discriminated(discriminator, child) => {
-                    serializer.serialize_element(&discriminator)?;
-                    serializer.serialize_element(&child)?;
-                }
-            }
+            serializer.serialize_element(&self.pop_child(schema))?
         }
         serializer.end()
     }
@@ -1605,8 +1728,7 @@ impl<'a> ValueCursor<'a> {
             | (TraceNode::Some, Schema::OptionSome(_))
             | (TraceNode::Unit, Schema::Unit)
             | (TraceNode::Map, Schema::Map(_, _))
-            | (TraceNode::Sequence, Schema::Sequence(_))
-            | (TraceNode::Skip, Schema::Skip) => true,
+            | (TraceNode::Sequence, Schema::Sequence(_)) => true,
 
             (TraceNode::UnitStruct(trace_name), Schema::UnitStruct(schema_name))
             | (TraceNode::NewtypeStruct(trace_name), Schema::NewtypeStruct(schema_name, _)) => {
@@ -1711,8 +1833,7 @@ impl<'a> ValueCursor<'a> {
             Schema::Unit
             | Schema::UnitStruct(_)
             | Schema::UnitVariant(_, _)
-            | Schema::OptionNone
-            | Schema::Skip => serializer.serialize_unit(),
+            | Schema::OptionNone => serializer.serialize_unit(),
 
             Schema::OptionSome(inner)
             | Schema::NewtypeStruct(_, inner)
@@ -2132,14 +2253,13 @@ where
             .root
             .schema_list(field_schemas)
             .map_err(DeserializerT::Error::custom)?;
-        let length = field_names.len();
-        if length != field_schemas.len() {
+        if field_names.len() != field_schemas.len() {
             return Err(DeserializerT::Error::custom(
                 "bad schema: field name length and field schema length mismatch",
             ));
         }
         self.inner.deserialize_tuple(
-            length,
+            field_names.len(),
             SchemaStructDeserializer {
                 root: self.root,
                 field_names,
@@ -2420,7 +2540,6 @@ where
             Schema::StructVariant(_, _, _, _) => Unexpected::StructVariant,
 
             Schema::Union(_) => Unexpected::Other("enum, skippable field or untagged union"),
-            Schema::Skip => Unexpected::Other("skipped field"),
         })
     }
 
@@ -2516,7 +2635,6 @@ where
             Schema::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_any { visitor })
             }
-            Schema::Skip => self.invalid_type_error(&visitor),
         }
     }
 
@@ -2555,7 +2673,6 @@ where
                 .deserialize_unit(IgnoredAny)
                 .and_then(|_| visitor.visit_none()),
             Schema::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
-            Schema::Skip => self.invalid_type_error(&visitor),
             _ => visitor.visit_some(self),
         }
     }
@@ -2590,7 +2707,6 @@ where
             Schema::NewtypeStruct(_, inner) | Schema::NewtypeVariant(_, _, inner) => {
                 visitor.visit_newtype_struct(self.forward(inner)?)
             }
-            Schema::Skip => self.invalid_type_error(&visitor),
             _ => visitor.visit_newtype_struct(self),
         }
     }
@@ -2734,7 +2850,6 @@ where
                 .forward(inner)?
                 .deserialize_enum(name, variants, visitor),
 
-            Schema::Skip => self.invalid_type_error(&visitor),
             _ => visitor.visit_enum(self),
         }
     }
@@ -3024,61 +3139,6 @@ pub struct SchemaStructDeserializer<'schema, InnerT> {
     inner: InnerT,
 }
 
-impl<'schema, 'de, SeqAccessT> SchemaStructDeserializer<'schema, SeqAccessT>
-where
-    SeqAccessT: SeqAccess<'de>,
-{
-    fn next(&mut self) -> Result<Option<(&'schema str, Schema)>, SeqAccessT::Error> {
-        while let (Some(&name), Some(&schema)) = (
-            self.field_names.split_off_first(),
-            self.field_schemas.split_off_first(),
-        ) {
-            let name = self.root.name(name).map_err(SeqAccessT::Error::custom)?;
-            let schema = self
-                .root
-                .schema(schema)
-                .map_err(SeqAccessT::Error::custom)?;
-
-            // Resolve embedded discriminants for unions, skipping over skipped fields.
-            let schema_list = match schema {
-                // Skipped field, continue outer loop.
-                Schema::Skip => {
-                    self.inner.next_element::<()>()?;
-                    continue;
-                }
-
-                // A union field which has its discriminant embedded in the struct tuple.
-                Schema::Union(schema_list) => schema_list,
-
-                // A non-union field, directly serialized in the struct tuple.
-                schema => return Ok(Some((name, schema))),
-            };
-            let schema_list = self
-                .root
-                .schema_list(schema_list)
-                .map_err(SeqAccessT::Error::custom)?;
-
-            // Read the embedded discriminant from the tuple and pick the correct schema out of the
-            // union.
-            let embedded_discriminant = self.inner.next_element::<u32>()?.ok_or_else(|| {
-                SeqAccessT::Error::custom("missing embedded discriminant in struct")
-            })?;
-            let schema = *usize::try_from(embedded_discriminant)
-                .ok()
-                .and_then(|discriminant| schema_list.get(discriminant))
-                .ok_or_else(|| SeqAccessT::Error::custom("bad embedded discriminant for field"))?;
-            let schema = self
-                .root
-                .schema(schema)
-                .map_err(SeqAccessT::Error::custom)?;
-
-            return Ok(Some((name, schema)));
-        }
-
-        Ok(None)
-    }
-}
-
 impl<'schema, 'de, VisitorT> serde::de::Visitor<'de> for SchemaStructDeserializer<'schema, VisitorT>
 where
     VisitorT: serde::de::Visitor<'de>,
@@ -3114,18 +3174,14 @@ where
     where
         K: DeserializeSeed<'de>,
     {
-        match self.next() {
-            Ok(Some((name, schema))) => {
-                self.next_value_schema = Some(schema);
-                seed.deserialize(NameDeserializer {
-                    name,
-                    phantom: PhantomData,
-                })
-                .map(Some)
-            }
-            Ok(None) => Ok(None),
-            Err(error) => Err(error),
-        }
+        let Some(&name) = self.field_names.split_off_first() else {
+            return Ok(None);
+        };
+        seed.deserialize(NameDeserializer {
+            name: self.root.name(name).map_err(Self::Error::custom)?,
+            phantom: PhantomData,
+        })
+        .map(Some)
     }
 
     #[inline]
@@ -3133,48 +3189,16 @@ where
     where
         V: DeserializeSeed<'de>,
     {
+        let Some(&schema) = self.field_schemas.split_off_first() else {
+            return Err(Self::Error::custom("more struct fields than schemas"));
+        };
         self.inner
             .next_element_seed(SchemaDeserializer {
                 root: self.root,
-                schema: self
-                    .next_value_schema
-                    .take()
-                    .expect("called next_value_seed without next_key_seed in struct"),
+                schema: self.root.schema(schema).map_err(Self::Error::custom)?,
                 inner: seed,
             })?
-            .ok_or_else(|| Self::Error::custom("missing value for key"))
-    }
-
-    #[inline]
-    fn next_entry_seed<K, V>(
-        &mut self,
-        kseed: K,
-        vseed: V,
-    ) -> Result<Option<(K::Value, V::Value)>, Self::Error>
-    where
-        K: DeserializeSeed<'de>,
-        V: DeserializeSeed<'de>,
-    {
-        match self.next() {
-            Ok(Some((name, schema))) => {
-                self.next_value_schema = Some(schema);
-                let key = kseed.deserialize(NameDeserializer {
-                    name,
-                    phantom: PhantomData,
-                })?;
-                let value = self
-                    .inner
-                    .next_element_seed(SchemaDeserializer {
-                        root: self.root,
-                        schema,
-                        inner: vseed,
-                    })?
-                    .ok_or_else(|| Self::Error::custom("missing value for key"))?;
-                Ok(Some((key, value)))
-            }
-            Ok(None) => Ok(None),
-            Err(error) => Err(error),
-        }
+            .ok_or_else(|| Self::Error::custom("more struct keys than values"))
     }
 }
 
@@ -3308,7 +3332,6 @@ trait ReadTraceExt<'data> {
             Trace::String => TraceNode::String,
             Trace::Bytes => TraceNode::Bytes,
 
-            Trace::Skip => TraceNode::Skip,
             Trace::OptionNone => TraceNode::None,
             Trace::OptionSome => TraceNode::Some,
 
@@ -3333,6 +3356,7 @@ trait ReadTraceExt<'data> {
             Trace::StructVariant => {
                 TraceNode::StructVariant(self.pop_name(), self.pop_name(), self.pop_name_list())
             }
+            Trace::Skip => TraceNode::Skip,
         }
     }
 
