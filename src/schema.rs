@@ -1,28 +1,23 @@
-use itertools::Itertools;
-use serde::{
-    Deserialize, Serialize,
-};
-use std::{
-    fmt::{Debug, Write},
-    hash::Hash,
-};
+use serde::{Deserialize, Serialize};
+use std::hash::Hash;
 use thiserror::Error;
 
 use crate::indices::{
-    FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaIndex, SchemaListIndex,
+    FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct RootSchema {
-    pub(crate) schemas: Box<[Schema]>,
+pub struct Schema {
+    pub(crate) root_index: SchemaNodeIndex,
+    pub(crate) nodes: Box<[SchemaNode]>,
     pub(crate) names: Box<[Box<str>]>,
     pub(crate) name_lists: Box<[Box<[NameIndex]>]>,
-    pub(crate) schema_lists: Box<[Box<[SchemaIndex]>]>,
+    pub(crate) node_lists: Box<[Box<[SchemaNodeIndex]>]>,
     pub(crate) field_lists: Box<[Box<[FieldIndex]>]>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Schema {
+pub enum SchemaNode {
     Bool,
     I8,
     I16,
@@ -44,35 +39,40 @@ pub enum Schema {
     Bytes,
 
     OptionNone,
-    OptionSome(SchemaIndex),
+    OptionSome(SchemaNodeIndex),
 
     Unit,
     UnitStruct(NameIndex),
     UnitVariant(NameIndex, NameIndex),
 
-    NewtypeStruct(NameIndex, SchemaIndex),
-    NewtypeVariant(NameIndex, NameIndex, SchemaIndex),
+    NewtypeStruct(NameIndex, SchemaNodeIndex),
+    NewtypeVariant(NameIndex, NameIndex, SchemaNodeIndex),
 
-    Sequence(SchemaIndex),
-    Map(SchemaIndex, SchemaIndex),
+    Sequence(SchemaNodeIndex),
+    Map(SchemaNodeIndex, SchemaNodeIndex),
 
-    Tuple(u32, SchemaListIndex),
-    TupleStruct(NameIndex, u32, SchemaListIndex),
-    TupleVariant(NameIndex, NameIndex, u32, SchemaListIndex),
+    Tuple(u32, SchemaNodeListIndex),
+    TupleStruct(NameIndex, u32, SchemaNodeListIndex),
+    TupleVariant(NameIndex, NameIndex, u32, SchemaNodeListIndex),
 
-    Struct(NameIndex, NameListIndex, FieldListIndex, SchemaListIndex),
+    Struct(
+        NameIndex,
+        NameListIndex,
+        FieldListIndex,
+        SchemaNodeListIndex,
+    ),
     StructVariant(
         NameIndex,
         NameIndex,
         NameListIndex,
         FieldListIndex,
-        SchemaListIndex,
+        SchemaNodeListIndex,
     ),
 
-    Union(SchemaListIndex),
+    Union(SchemaNodeListIndex),
 }
 
-impl RootSchema {
+impl Schema {
     #[inline]
     pub(crate) fn name(&self, index: NameIndex) -> Result<&str, NoSuchNameError> {
         self.names
@@ -93,19 +93,19 @@ impl RootSchema {
     }
 
     #[inline]
-    pub(crate) fn schema(&self, index: SchemaIndex) -> Result<Schema, NoSuchSchemaError> {
-        self.schemas
+    pub(crate) fn node(&self, index: SchemaNodeIndex) -> Result<SchemaNode, NoSuchSchemaError> {
+        self.nodes
             .get(usize::from(index))
             .copied()
             .ok_or(NoSuchSchemaError(index))
     }
 
     #[inline]
-    pub(crate) fn schema_list(
+    pub(crate) fn node_list(
         &self,
-        index: SchemaListIndex,
-    ) -> Result<&[SchemaIndex], NoSuchSchemaListError> {
-        self.schema_lists
+        index: SchemaNodeListIndex,
+    ) -> Result<&[SchemaNodeIndex], NoSuchSchemaListError> {
+        self.node_lists
             .get(usize::from(index))
             .map(|list| &**list)
             .ok_or(NoSuchSchemaListError(index))
@@ -122,96 +122,100 @@ impl RootSchema {
             .ok_or(NoSuchFieldListError(index))
     }
 
-    pub(crate) fn dump(&self, indent: &mut String, index: SchemaIndex) -> Result<(), DumpError> {
+    pub(crate) fn dump(
+        &self,
+        indent: &mut String,
+        index: SchemaNodeIndex,
+    ) -> Result<(), DumpError> {
         if indent.is_empty() {
             eprintln!("SCHEMA:")
         }
         indent.push_str("  ");
-        let schema = self.schema(index)?;
-        match schema {
-            Schema::Bool
-            | Schema::I8
-            | Schema::I16
-            | Schema::I32
-            | Schema::I64
-            | Schema::I128
-            | Schema::U8
-            | Schema::U16
-            | Schema::U32
-            | Schema::U64
-            | Schema::U128
-            | Schema::F32
-            | Schema::F64
-            | Schema::Char
-            | Schema::String
-            | Schema::Bytes
-            | Schema::Unit => eprintln!("{indent}{schema:?},"),
-            Schema::OptionNone => eprintln!("{indent}::Option::None"),
+        let node = self.node(index)?;
+        match node {
+            SchemaNode::Bool
+            | SchemaNode::I8
+            | SchemaNode::I16
+            | SchemaNode::I32
+            | SchemaNode::I64
+            | SchemaNode::I128
+            | SchemaNode::U8
+            | SchemaNode::U16
+            | SchemaNode::U32
+            | SchemaNode::U64
+            | SchemaNode::U128
+            | SchemaNode::F32
+            | SchemaNode::F64
+            | SchemaNode::Char
+            | SchemaNode::String
+            | SchemaNode::Bytes
+            | SchemaNode::Unit => eprintln!("{indent}{node:?},"),
+            SchemaNode::OptionNone => eprintln!("{indent}::Option::None"),
 
-            Schema::UnitStruct(name) => eprintln!("{}{},", indent, self.name(name)?),
-            Schema::UnitVariant(name, variant) => {
+            SchemaNode::UnitStruct(name) => eprintln!("{}{},", indent, self.name(name)?),
+            SchemaNode::UnitVariant(name, variant) => {
                 eprintln!("{}{}::{},", indent, self.name(name)?, self.name(variant)?)
             }
 
-            Schema::OptionSome(inner) => {
+            SchemaNode::OptionSome(inner) => {
                 eprintln!("{}::Option::Some(", indent);
                 self.dump(indent, inner)?;
                 eprintln!("{indent}),")
             }
-            Schema::NewtypeStruct(name, inner) => {
+            SchemaNode::NewtypeStruct(name, inner) => {
                 eprintln!("{}{}(", indent, self.name(name)?);
                 self.dump(indent, inner)?;
                 eprintln!("{indent}),")
             }
-            Schema::NewtypeVariant(name, variant, inner) => {
+            SchemaNode::NewtypeVariant(name, variant, inner) => {
                 eprintln!("{}{}::{}(", indent, self.name(name)?, self.name(variant)?);
                 self.dump(indent, inner)?;
                 eprintln!("{indent}),")
             }
-            Schema::Map(key, value) => {
+            SchemaNode::Map(key, value) => {
                 eprintln!("{indent}{{");
                 self.dump(indent, key)?;
                 self.dump(indent, value)?;
                 eprintln!("{indent}}},")
             }
-            Schema::Sequence(item) => {
+            SchemaNode::Sequence(item) => {
                 eprintln!("{indent}[");
                 self.dump(indent, item)?;
                 eprintln!("{indent}],")
             }
 
-            Schema::Tuple(_, schema_list) => {
+            SchemaNode::Tuple(_, schema_list) => {
                 eprintln!("{indent}(");
-                for &schema in self.schema_list(schema_list)? {
-                    self.dump(indent, schema)?;
+                for &node in self.node_list(schema_list)? {
+                    self.dump(indent, node)?;
                 }
                 eprintln!("{indent}),")
             }
 
-            Schema::TupleStruct(name, _, schema_list) => {
+            SchemaNode::TupleStruct(name, _, schema_list) => {
                 eprintln!("{}{}(", indent, self.name(name)?);
-                for &schema in self.schema_list(schema_list)? {
-                    self.dump(indent, schema)?;
+                for &node in self.node_list(schema_list)? {
+                    self.dump(indent, node)?;
                 }
                 eprintln!("{indent}),")
             }
-            Schema::TupleVariant(name, variant, _, schema_list) => {
+            SchemaNode::TupleVariant(name, variant, _, schema_list) => {
                 eprintln!("{}{}::{}(", indent, self.name(name)?, self.name(variant)?);
-                for &schema in self.schema_list(schema_list)? {
-                    self.dump(indent, schema)?;
+                for &node in self.node_list(schema_list)? {
+                    self.dump(indent, node)?;
                 }
                 eprintln!("{indent}),")
             }
 
-            Schema::Struct(name, name_list, skip_list, type_list) => {
+            SchemaNode::Struct(name, name_list, skip_list, type_list) => {
                 eprintln!("{}{} {{", indent, self.name(name)?);
                 indent.push_str("  ");
                 let mut skips = self.field_list(skip_list)?;
                 let has_skips = !skips.is_empty();
-                for (i_field, (&name, &schema)) in self
+                for (i_field, (&name, &node)) in self
                     .name_list(name_list)?
                     .iter()
-                    .zip(self.schema_list(type_list)?)
+                    .zip(self.node_list(type_list)?)
                     .enumerate()
                 {
                     if has_skips {
@@ -227,20 +231,20 @@ impl RootSchema {
                     } else {
                         eprintln!("{}{}:", indent, self.name(name)?);
                     }
-                    self.dump(indent, schema)?;
+                    self.dump(indent, node)?;
                 }
                 indent.truncate(indent.len() - 2);
                 eprintln!("{indent}}},")
             }
-            Schema::StructVariant(name, variant, name_list, skip_list, type_list) => {
+            SchemaNode::StructVariant(name, variant, name_list, skip_list, type_list) => {
                 eprintln!("{}{}::{} {{", indent, self.name(name)?, self.name(variant)?);
                 indent.push_str("  ");
                 let mut skips = self.field_list(skip_list)?;
                 let has_skips = !skips.is_empty();
-                for (i_field, (&name, &schema)) in self
+                for (i_field, (&name, &node)) in self
                     .name_list(name_list)?
                     .iter()
-                    .zip(self.schema_list(type_list)?)
+                    .zip(self.node_list(type_list)?)
                     .enumerate()
                 {
                     if has_skips {
@@ -256,17 +260,17 @@ impl RootSchema {
                     } else {
                         eprintln!("{}{}:", indent, self.name(name)?);
                     }
-                    self.dump(indent, schema)?;
+                    self.dump(indent, node)?;
                 }
                 indent.truncate(indent.len() - 2);
                 eprintln!("{indent}}},")
             }
 
-            Schema::Union(type_list) => {
+            SchemaNode::Union(type_list) => {
                 eprintln!("{indent}<");
                 indent.push_str("  ");
-                for &schema in self.schema_list(type_list)? {
-                    self.dump(indent, schema)?;
+                for &node in self.node_list(type_list)? {
+                    self.dump(indent, node)?;
                 }
                 indent.truncate(indent.len() - 2);
                 eprintln!("{indent}>,")
@@ -289,12 +293,12 @@ pub(crate) struct NoSuchNameError(NameIndex);
 pub(crate) struct NoSuchNameListError(NameListIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
-#[error("no such schema with index {0:?}")]
-pub(crate) struct NoSuchSchemaError(SchemaIndex);
+#[error("no such node with index {0:?}")]
+pub(crate) struct NoSuchSchemaError(SchemaNodeIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
-#[error("no such schema list with index {0:?}")]
-pub(crate) struct NoSuchSchemaListError(SchemaListIndex);
+#[error("no such node list with index {0:?}")]
+pub(crate) struct NoSuchSchemaListError(SchemaNodeListIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
 #[error("no such field list with index {0:?}")]

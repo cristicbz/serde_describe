@@ -2,14 +2,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SerError {
-    #[error("too many schemas for u32")]
-    TooManySchemas,
+    #[error("too many schema nodes for u32")]
+    TooManySchemaNodes,
 
-    #[error("too many schema lists for u32")]
-    TooManySchemaLists,
-
-    #[error("too many field skip lists for u32")]
-    TooManySkipLists,
+    #[error("too many schema node lists for u32")]
+    TooManySchemaNodeLists,
 
     #[error("too many fields for u32")]
     TooManyFields,
@@ -19,9 +16,6 @@ pub enum SerError {
 
     #[error("too many field lists for u32")]
     TooManyNameLists,
-
-    #[error("too many byte strings for u32")]
-    TooManyByteStrings,
 
     #[error("too many values for u32")]
     TooManyValues,

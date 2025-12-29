@@ -1,10 +1,5 @@
-use itertools::Itertools;
 use serde::Serialize;
-use std::{
-    cell::Cell,
-    fmt::{Debug, Write},
-    hash::Hash,
-};
+use std::{cell::Cell, hash::Hash};
 
 use crate::indices::{NameIndex, NameListIndex};
 

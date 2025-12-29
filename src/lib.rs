@@ -11,8 +11,7 @@ pub(crate) mod pool;
 pub(crate) mod schema;
 pub(crate) mod ser;
 pub(crate) mod trace;
-pub(crate) mod value;
 
-pub use described::{Described, DescribedElsewhere};
-pub use schema::RootSchema;
-pub use value::{Value, ValueData};
+pub use builder::{SchemaBuilder, Value};
+pub use described::{DescribedBy, SeedDescribedBy, SeedSelfDescribed, SelfDescribed};
+pub use schema::Schema;

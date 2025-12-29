@@ -1,12 +1,13 @@
 use crate::{
     anonymous_union::{serialized_anonymous_variant, UNION_ENUM_NAME},
-    described::Described,
-    indices::{FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaIndex, SchemaListIndex},
-    schema::Schema,
-    trace::ReadTraceExt,
-    trace::TraceNode,
-    value::{self, Value},
-    RootSchema,
+    builder::SchemaBuilder,
+    described::SelfDescribed,
+    indices::{
+        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
+    },
+    schema::SchemaNode,
+    trace::{ReadTraceExt, TraceNode},
+    DescribedBy, Schema, Value,
 };
 use itertools::Itertools;
 use serde::{
@@ -17,7 +18,7 @@ use serde::{
 };
 use std::{cell::Cell, fmt::Debug};
 
-impl<T> Serialize for Described<T>
+impl<T> Serialize for SelfDescribed<T>
 where
     T: Serialize,
 {
@@ -26,28 +27,29 @@ where
     where
         S: Serializer,
     {
-        value::to_value(&self.0)
-            .map_err(S::Error::custom)?
-            .serialize(serializer)
+        let mut builder = SchemaBuilder::new();
+        let value = builder.serialize_value(&self.0).map_err(S::Error::custom)?;
+        let schema = builder.build().map_err(S::Error::custom)?;
+        DescribedBy(value, &schema).serialize(serializer)
     }
 }
 
-impl Serialize for Value {
+impl<'schema> Serialize for DescribedBy<'schema, Value> {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let tail = Cell::new(&*self.data.0);
-        let cursor = ValueCursor::start(&self.schema, self.root_index, &tail);
-        (&self.schema, (self.root_index, cursor)).serialize(serializer)
+        let tail = Cell::new(&*(self.0).0);
+        let cursor = ValueCursor::start(&self.1, &tail);
+        (&self.1, ((self.1).root_index, cursor)).serialize(serializer)
     }
 }
 
 #[derive(Copy, Clone)]
 struct ValueCursor<'a> {
-    root: &'a RootSchema,
-    schema: Schema,
+    schema: &'a Schema,
+    node: SchemaNode,
     trace: TraceNode,
     data: &'a [u8],
     tail: &'a Cell<&'a [u8]>,
@@ -66,7 +68,7 @@ impl Debug for CheckResult<'_> {
             Self::Discriminated(discriminator, cursor) => f
                 .debug_struct("Discriminated")
                 .field("discriminator", &discriminator)
-                .field("schema", &cursor.schema)
+                .field("node", &cursor.node)
                 .finish(),
         }
     }
@@ -74,10 +76,10 @@ impl Debug for CheckResult<'_> {
 
 impl<'a> ValueCursor<'a> {
     #[inline]
-    fn start(root: &'a RootSchema, schema: SchemaIndex, tail: &'a Cell<&'a [u8]>) -> Self {
+    fn start(schema: &'a Schema, tail: &'a Cell<&'a [u8]>) -> Self {
         Self {
-            root,
-            schema: root.schema(schema).unwrap(),
+            schema,
+            node: schema.node(schema.root_index).unwrap(),
             trace: tail.pop_trace_node(),
             tail,
             data: tail.get(),
@@ -85,10 +87,10 @@ impl<'a> ValueCursor<'a> {
     }
 
     #[inline]
-    fn pop_child(&self, schema: SchemaIndex) -> Self {
+    fn pop_child(&self, node: SchemaNodeIndex) -> Self {
         Self {
-            root: self.root,
-            schema: self.root.schema(schema).unwrap(),
+            schema: self.schema,
+            node: self.schema.node(node).unwrap(),
             trace: self.tail.pop_trace_node(),
             data: self.tail.get(),
             tail: self.tail,
@@ -96,10 +98,10 @@ impl<'a> ValueCursor<'a> {
     }
 
     #[inline]
-    fn traced_child(&self, schema: SchemaIndex, trace: TraceNode) -> Self {
+    fn traced_child(&self, node: SchemaNodeIndex, trace: TraceNode) -> Self {
         Self {
-            root: self.root,
-            schema: self.root.schema(schema).unwrap(),
+            schema: self.schema,
+            node: self.schema.node(node).unwrap(),
             trace,
             data: self.tail.get(),
             tail: self.tail,
@@ -107,7 +109,7 @@ impl<'a> ValueCursor<'a> {
     }
 
     #[inline]
-    fn serialize_inner<S>(&self, serializer: S, inner: SchemaIndex) -> Result<S::Ok, S::Error>
+    fn serialize_inner<S>(&self, serializer: S, inner: SchemaNodeIndex) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -118,19 +120,19 @@ impl<'a> ValueCursor<'a> {
     fn serialize_tuple<S>(
         &self,
         serializer: S,
-        schema_length: u32,
-        schema_list: SchemaListIndex,
+        length: u32,
+        node_list: SchemaNodeListIndex,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let schema_list = self.root.schema_list(schema_list).unwrap();
-        let schema_length = usize::try_from(schema_length).expect("usize at least 32-bits");
-        assert_eq!(schema_list.len(), schema_length);
+        let node_list = self.schema.node_list(node_list).unwrap();
+        let length = usize::try_from(length).expect("usize at least 32-bits");
+        assert_eq!(node_list.len(), length);
 
-        let mut serializer = serializer.serialize_tuple(schema_length)?;
-        for &schema in schema_list {
-            serializer.serialize_element(&self.pop_child(schema))?
+        let mut serializer = serializer.serialize_tuple(length)?;
+        for &node in node_list {
+            serializer.serialize_element(&self.pop_child(node))?
         }
         serializer.end()
     }
@@ -140,8 +142,8 @@ impl<'a> ValueCursor<'a> {
         &self,
         serializer: S,
         length: usize,
-        key: SchemaIndex,
-        value: SchemaIndex,
+        key: SchemaNodeIndex,
+        value: SchemaNodeIndex,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -159,7 +161,7 @@ impl<'a> ValueCursor<'a> {
         &self,
         serializer: S,
         length: usize,
-        item: SchemaIndex,
+        item: SchemaNodeIndex,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -177,22 +179,22 @@ impl<'a> ValueCursor<'a> {
         serializer: S,
         name_list: NameListIndex,
         skip_list: FieldListIndex,
-        schema_list: SchemaListIndex,
+        node_list: SchemaNodeListIndex,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let skip_list = self.root.field_list(skip_list).unwrap();
-        let schema_list = self.root.schema_list(schema_list).unwrap();
-        let name_list = self.root.name_list(name_list).unwrap();
+        let skip_list = self.schema.field_list(skip_list).unwrap();
+        let node_list = self.schema.node_list(node_list).unwrap();
+        let name_list = self.schema.name_list(name_list).unwrap();
         let length = self.tail.pop_length_u32();
         let presence = self.tail.pop_slice(length * std::mem::size_of::<u32>());
-        assert_eq!(name_list.len(), schema_list.len());
+        assert_eq!(name_list.len(), node_list.len());
 
         if skip_list.is_empty() {
-            let mut serializer = serializer.serialize_tuple(schema_list.len())?;
-            for &schema in schema_list {
-                serializer.serialize_element(&self.pop_child(schema))?
+            let mut serializer = serializer.serialize_tuple(node_list.len())?;
+            for &node in node_list {
+                serializer.serialize_element(&self.pop_child(node))?
             }
             serializer.end()
         } else {
@@ -202,7 +204,7 @@ impl<'a> ValueCursor<'a> {
                 presence,
                 name_list,
                 skip_list,
-                schema_list,
+                node_list,
             }
             .serialize(serializer)
         }
@@ -210,53 +212,53 @@ impl<'a> ValueCursor<'a> {
 
     #[inline]
     fn check(&self) -> Option<CheckResult<'a>> {
-        let matches = match (self.trace, self.schema) {
-            (TraceNode::Bool, Schema::Bool)
-            | (TraceNode::I8, Schema::I8)
-            | (TraceNode::I16, Schema::I16)
-            | (TraceNode::I32, Schema::I32)
-            | (TraceNode::I64, Schema::I64)
-            | (TraceNode::I128, Schema::I128)
-            | (TraceNode::U8, Schema::U8)
-            | (TraceNode::U16, Schema::U16)
-            | (TraceNode::U32, Schema::U32)
-            | (TraceNode::U64, Schema::U64)
-            | (TraceNode::U128, Schema::U128)
-            | (TraceNode::F32, Schema::F32)
-            | (TraceNode::F64, Schema::F64)
-            | (TraceNode::Char, Schema::Char)
-            | (TraceNode::String, Schema::String)
-            | (TraceNode::Bytes, Schema::Bytes)
-            | (TraceNode::None, Schema::OptionNone)
-            | (TraceNode::Some, Schema::OptionSome(_))
-            | (TraceNode::Unit, Schema::Unit)
-            | (TraceNode::Map, Schema::Map(_, _))
-            | (TraceNode::Sequence, Schema::Sequence(_)) => true,
+        let matches = match (self.trace, self.node) {
+            (TraceNode::Bool, SchemaNode::Bool)
+            | (TraceNode::I8, SchemaNode::I8)
+            | (TraceNode::I16, SchemaNode::I16)
+            | (TraceNode::I32, SchemaNode::I32)
+            | (TraceNode::I64, SchemaNode::I64)
+            | (TraceNode::I128, SchemaNode::I128)
+            | (TraceNode::U8, SchemaNode::U8)
+            | (TraceNode::U16, SchemaNode::U16)
+            | (TraceNode::U32, SchemaNode::U32)
+            | (TraceNode::U64, SchemaNode::U64)
+            | (TraceNode::U128, SchemaNode::U128)
+            | (TraceNode::F32, SchemaNode::F32)
+            | (TraceNode::F64, SchemaNode::F64)
+            | (TraceNode::Char, SchemaNode::Char)
+            | (TraceNode::String, SchemaNode::String)
+            | (TraceNode::Bytes, SchemaNode::Bytes)
+            | (TraceNode::None, SchemaNode::OptionNone)
+            | (TraceNode::Some, SchemaNode::OptionSome(_))
+            | (TraceNode::Unit, SchemaNode::Unit)
+            | (TraceNode::Map, SchemaNode::Map(_, _))
+            | (TraceNode::Sequence, SchemaNode::Sequence(_)) => true,
 
-            (TraceNode::UnitStruct(trace_name), Schema::UnitStruct(schema_name))
-            | (TraceNode::NewtypeStruct(trace_name), Schema::NewtypeStruct(schema_name, _)) => {
+            (TraceNode::UnitStruct(trace_name), SchemaNode::UnitStruct(schema_name))
+            | (TraceNode::NewtypeStruct(trace_name), SchemaNode::NewtypeStruct(schema_name, _)) => {
                 trace_name == schema_name
             }
 
             (
                 TraceNode::UnitVariant(trace_name, trace_variant),
-                Schema::UnitVariant(schema_name, schema_variant),
+                SchemaNode::UnitVariant(schema_name, schema_variant),
             )
             | (
                 TraceNode::NewtypeVariant(trace_name, trace_variant),
-                Schema::NewtypeVariant(schema_name, schema_variant, _),
+                SchemaNode::NewtypeVariant(schema_name, schema_variant, _),
             ) => (trace_name, trace_variant) == (schema_name, schema_variant),
 
-            (TraceNode::Tuple(trace_length), Schema::Tuple(schema_length, _)) => {
+            (TraceNode::Tuple(trace_length), SchemaNode::Tuple(schema_length, _)) => {
                 trace_length == schema_length
             }
             (
                 TraceNode::TupleStruct(trace_length, trace_name),
-                Schema::TupleStruct(schema_name, schema_length, _),
+                SchemaNode::TupleStruct(schema_name, schema_length, _),
             ) => (trace_length, trace_name) == (schema_length, schema_name),
             (
                 TraceNode::TupleVariant(trace_length, trace_name, trace_variant),
-                Schema::TupleVariant(schema_name, schema_variant, schema_length, _),
+                SchemaNode::TupleVariant(schema_name, schema_variant, schema_length, _),
             ) => {
                 (trace_length, trace_name, trace_variant)
                     == (schema_length, schema_name, schema_variant)
@@ -264,23 +266,23 @@ impl<'a> ValueCursor<'a> {
 
             (
                 TraceNode::Struct(trace_name, trace_name_list),
-                Schema::Struct(schema_name, schema_name_list, _, _),
+                SchemaNode::Struct(schema_name, schema_name_list, _, _),
             ) => (trace_name, trace_name_list) == (schema_name, schema_name_list),
             (
                 TraceNode::StructVariant(trace_name, trace_variant, trace_name_list),
-                Schema::StructVariant(schema_name, schema_variant, schema_name_list, _, _),
+                SchemaNode::StructVariant(schema_name, schema_variant, schema_name_list, _, _),
             ) => {
                 (trace_name, trace_variant, trace_name_list)
                     == (schema_name, schema_variant, schema_name_list)
             }
 
-            (trace, Schema::Union(schema_list)) => {
+            (trace, SchemaNode::Union(schema_list)) => {
                 return self
-                    .root
-                    .schema_list(schema_list)
+                    .schema
+                    .node_list(schema_list)
                     .unwrap()
                     .iter()
-                    .map(|&schema| self.traced_child(schema, trace))
+                    .map(|&node| self.traced_child(node, trace))
                     .find_position(|child| child.check().is_some())
                     .map(|(discriminant, child)| {
                         CheckResult::Discriminated(
@@ -314,52 +316,52 @@ impl<'a> ValueCursor<'a> {
                 &child,
             );
         }
-        match self.schema {
-            Schema::Bool => serializer.serialize_bool(data.pop_bool()),
-            Schema::I8 => serializer.serialize_i8(data.pop_i8()),
-            Schema::I16 => serializer.serialize_i16(data.pop_i16()),
-            Schema::I32 => serializer.serialize_i32(data.pop_i32()),
-            Schema::I64 => serializer.serialize_i64(data.pop_i64()),
-            Schema::I128 => serializer.serialize_i128(data.pop_i128()),
-            Schema::U8 => serializer.serialize_u8(data.pop_u8()),
-            Schema::U16 => serializer.serialize_u16(data.pop_u16()),
-            Schema::U32 => serializer.serialize_u32(data.pop_u32()),
-            Schema::U64 => serializer.serialize_u64(data.pop_u64()),
-            Schema::U128 => serializer.serialize_u128(data.pop_u128()),
-            Schema::F32 => serializer.serialize_f32(data.pop_f32()),
-            Schema::F64 => serializer.serialize_f64(data.pop_f64()),
-            Schema::Char => serializer.serialize_char(data.pop_char()),
-            Schema::String => serializer.serialize_str(data.pop_str(data.pop_length_u32())),
-            Schema::Bytes => serializer.serialize_bytes(data.pop_slice(data.pop_length_u32())),
+        match self.node {
+            SchemaNode::Bool => serializer.serialize_bool(data.pop_bool()),
+            SchemaNode::I8 => serializer.serialize_i8(data.pop_i8()),
+            SchemaNode::I16 => serializer.serialize_i16(data.pop_i16()),
+            SchemaNode::I32 => serializer.serialize_i32(data.pop_i32()),
+            SchemaNode::I64 => serializer.serialize_i64(data.pop_i64()),
+            SchemaNode::I128 => serializer.serialize_i128(data.pop_i128()),
+            SchemaNode::U8 => serializer.serialize_u8(data.pop_u8()),
+            SchemaNode::U16 => serializer.serialize_u16(data.pop_u16()),
+            SchemaNode::U32 => serializer.serialize_u32(data.pop_u32()),
+            SchemaNode::U64 => serializer.serialize_u64(data.pop_u64()),
+            SchemaNode::U128 => serializer.serialize_u128(data.pop_u128()),
+            SchemaNode::F32 => serializer.serialize_f32(data.pop_f32()),
+            SchemaNode::F64 => serializer.serialize_f64(data.pop_f64()),
+            SchemaNode::Char => serializer.serialize_char(data.pop_char()),
+            SchemaNode::String => serializer.serialize_str(data.pop_str(data.pop_length_u32())),
+            SchemaNode::Bytes => serializer.serialize_bytes(data.pop_slice(data.pop_length_u32())),
 
-            Schema::Unit
-            | Schema::UnitStruct(_)
-            | Schema::UnitVariant(_, _)
-            | Schema::OptionNone => serializer.serialize_unit(),
+            SchemaNode::Unit
+            | SchemaNode::UnitStruct(_)
+            | SchemaNode::UnitVariant(_, _)
+            | SchemaNode::OptionNone => serializer.serialize_unit(),
 
-            Schema::OptionSome(inner)
-            | Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner) => self.serialize_inner(serializer, inner),
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => self.serialize_inner(serializer, inner),
 
-            Schema::Map(key, value) => {
+            SchemaNode::Map(key, value) => {
                 self.serialize_map(serializer, data.pop_length_u32(), key, value)
             }
-            Schema::Sequence(item) => {
+            SchemaNode::Sequence(item) => {
                 self.serialize_sequence(serializer, data.pop_length_u32(), item)
             }
 
-            Schema::Tuple(length, type_list)
-            | Schema::TupleStruct(_, length, type_list)
-            | Schema::TupleVariant(_, _, length, type_list) => {
+            SchemaNode::Tuple(length, type_list)
+            | SchemaNode::TupleStruct(_, length, type_list)
+            | SchemaNode::TupleVariant(_, _, length, type_list) => {
                 self.serialize_tuple(serializer, length, type_list)
             }
 
-            Schema::Struct(_, name_list, skip_list, type_list)
-            | Schema::StructVariant(_, _, name_list, skip_list, type_list) => {
+            SchemaNode::Struct(_, name_list, skip_list, type_list)
+            | SchemaNode::StructVariant(_, _, name_list, skip_list, type_list) => {
                 self.serialize_struct(serializer, name_list, skip_list, type_list)
             }
 
-            Schema::Union(_) => unreachable!("union finish called with simple check result"),
+            SchemaNode::Union(_) => unreachable!("union finish called with simple check result"),
         }
     }
 }
@@ -370,7 +372,7 @@ struct SkippableStructSerializer<'a, 'v> {
     variant: u64,
     name_list: &'a [NameIndex],
     skip_list: &'a [FieldIndex],
-    schema_list: &'a [SchemaIndex],
+    node_list: &'a [SchemaNodeIndex],
 }
 impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -387,9 +389,8 @@ impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
                 self.presence.len() / std::mem::size_of::<u32>(),
             )?;
             for field in iter_field_indices(self.presence) {
-                serializer.serialize_field(
-                    &self.cursor.pop_child(self.schema_list[usize::from(field)]),
-                )?;
+                serializer
+                    .serialize_field(&self.cursor.pop_child(self.node_list[usize::from(field)]))?;
             }
             serializer.end()
         } else {
@@ -403,7 +404,7 @@ impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
                     variant: self.variant >> 8,
                     name_list: self.name_list,
                     skip_list: &self.skip_list[8..],
-                    schema_list: self.schema_list,
+                    node_list: self.node_list,
                 },
             )
         }

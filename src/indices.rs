@@ -1,10 +1,5 @@
-use serde::{
-    Deserialize, Serialize,
-};
-use std::{
-    fmt::{Debug, Write},
-    hash::Hash,
-};
+use serde::{Deserialize, Serialize};
+use std::hash::Hash;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct TypeName(pub(crate) NameIndex, pub(crate) Option<NameIndex>);
@@ -14,15 +9,6 @@ macro_rules! u32_indices {
         $(
             #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
             pub(crate) struct $index_ty(nonmax::NonMaxU32);
-
-            impl $index_ty {
-                pub fn increment(&mut self, by: u32) -> Result<(), $crate::errors::SerError> {
-                     self.0 = (u32::from(self.0) + by)
-                        .try_into()
-                        .map_err(|_| $crate::errors::SerError::$error)?;
-                     Ok(())
-                }
-            }
 
             impl From<$index_ty> for u32 {
                 #[inline]
@@ -65,8 +51,8 @@ macro_rules! u32_indices {
     };
 }
 u32_indices! {
-    SchemaIndex => TooManySchemas,
-    SchemaListIndex => TooManySchemaLists,
+    SchemaNodeIndex => TooManySchemaNodes,
+    SchemaNodeListIndex => TooManySchemaNodeLists,
     FieldListIndex => TooManyFields,
     FieldIndex => TooManyFields,
     NameIndex => TooManyNames,

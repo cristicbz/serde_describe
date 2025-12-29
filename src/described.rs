@@ -1,16 +1,13 @@
-use std::marker::PhantomData;
-
-use crate::RootSchema;
+use crate::Schema;
 
 #[derive(Copy, Clone)]
-pub struct Described<T>(pub T);
+pub struct SelfDescribed<T>(pub T);
 
-pub struct DescribedElsewhere<'schema, T>(pub &'schema RootSchema, pub PhantomData<T>);
+#[derive(Copy, Clone)]
+pub struct DescribedBy<'schema, T>(pub T, pub &'schema Schema);
 
-impl<'schema, T> Copy for DescribedElsewhere<'schema, T> {}
-impl<'schema, T> Clone for DescribedElsewhere<'schema, T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
+#[derive(Copy, Clone)]
+pub struct SeedSelfDescribed<SeedT>(pub SeedT);
+
+#[derive(Copy, Clone)]
+pub struct SeedDescribedBy<'schema, SeedT>(pub SeedT, pub &'schema Schema);

@@ -1,4 +1,4 @@
-use bincol::Described;
+use bincol::SelfDescribed;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
@@ -139,15 +139,15 @@ fn main() {
     eprintln!(
         "DESCRIBED:\n{}\n\n",
         ron::ser::to_string_pretty(
-            &Described(&value),
+            &SelfDescribed(&value),
             PrettyConfig::default()
                 .struct_names(true)
                 .number_suffixes(true)
         )
         .unwrap()
     );
-    let serialized = bitcode::serialize(&Described(value)).unwrap();
-    value = bitcode::deserialize::<Described<Value<_>>>(&serialized)
+    let serialized = bitcode::serialize(&SelfDescribed(value)).unwrap();
+    value = bitcode::deserialize::<SelfDescribed<Value<_>>>(&serialized)
         .unwrap()
         .0;
     eprintln!("DESERIALIZED:\n{:#?}\n\n", value,);

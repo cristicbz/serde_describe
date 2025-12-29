@@ -1,13 +1,12 @@
 use crate::{
     errors::SerError,
     indices::{
-        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaIndex, SchemaListIndex,
+        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
         TraceIndex, TypeName,
     },
     pool::Pool,
-    schema::{RootSchema, Schema},
+    schema::{Schema, SchemaNode},
     trace::Trace,
-    value::{Value, ValueData},
 };
 use serde::{
     ser::{
@@ -16,303 +15,46 @@ use serde::{
     },
     Deserialize, Serialize,
 };
-use std::fmt::Debug;
 
-#[derive(Default, Clone, Serialize)]
-pub(crate) struct RootSchemaBuilder {
-    data: Vec<u8>,
+#[derive(Default, Clone)]
+pub struct Value(pub(crate) Vec<u8>);
+
+#[derive(Default, Clone)]
+pub struct SchemaBuilder {
     names: Pool<&'static str, NameIndex>,
     name_lists: Pool<Box<[NameIndex]>, NameListIndex>,
-    schemas: Pool<Schema, SchemaIndex>,
-    schema_lists: Pool<Box<[SchemaIndex]>, SchemaListIndex>,
+    nodes: Pool<SchemaNode, SchemaNodeIndex>,
+    node_lists: Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
     field_lists: Pool<Box<[FieldIndex]>, FieldListIndex>,
-    root: SchemaBuilder,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) enum SchemaBuilder {
-    Bool,
-
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-
-    F32,
-    F64,
-    Char,
-
-    String,
-    Bytes,
-
-    OptionNone,
-    OptionSome(Box<SchemaBuilder>),
-
-    Unit(Option<TypeName>),
-    Newtype(TypeName, Box<SchemaBuilder>),
-
-    Map(Box<SchemaBuilder>, Box<SchemaBuilder>),
-    Sequence(Box<SchemaBuilder>),
-
-    Union(Vec<SchemaBuilder>),
-
-    /// Tuple, tuple struct, tuple variant, struct or struct variant.
-    Record {
-        name: Option<TypeName>,
-        field_names: Option<NameListIndex>,
-        field_types: Vec<SchemaBuilder>,
-        skippable: Vec<FieldIndex>,
-        length: u32,
-    },
+    root: SchemaBuilderNode,
 }
 
 impl SchemaBuilder {
-    fn unify(&mut self, other: Self) -> Result<(), Self> {
-        match (&mut *self, other) {
-            (SchemaBuilder::Union(lefts), right) => {
-                if lefts.is_empty() {
-                    *self = right;
-                } else {
-                    right.add_to_nonempty_union(lefts);
-                }
-                Ok(())
-            }
-            (left, mut right @ SchemaBuilder::Union(_)) => {
-                std::mem::swap(left, &mut right);
-                left.unify(right)
-            }
-            (
-                SchemaBuilder::Newtype(left_name, left_inner),
-                SchemaBuilder::Newtype(right_name, right_inner),
-            ) => {
-                if *left_name == right_name {
-                    left_inner.union(*right_inner);
-                    Ok(())
-                } else {
-                    Err(SchemaBuilder::Newtype(right_name, right_inner))
-                }
-            }
-            (SchemaBuilder::OptionSome(left), SchemaBuilder::OptionSome(right)) => {
-                left.union(*right);
-                Ok(())
-            }
-            (
-                SchemaBuilder::Record {
-                    name: left_name,
-                    field_names: left_field_names,
-                    field_types: left_field_types,
-                    skippable: left_skippable,
-                    length: left_length,
-                },
-                SchemaBuilder::Record {
-                    name: right_name,
-                    field_names: right_field_names,
-                    field_types: right_field_types,
-                    skippable: right_skippable,
-                    length: right_length,
-                },
-            ) => {
-                if (*left_name, *left_field_names, *left_length)
-                    == (right_name, right_field_names, right_length)
-                {
-                    left_field_types
-                        .iter_mut()
-                        .zip(right_field_types)
-                        .for_each(|(left, right)| left.union(right));
-                    left_skippable.extend(right_skippable);
-                    left_skippable.sort_unstable();
-                    left_skippable.dedup();
-                    Ok(())
-                } else {
-                    Err(SchemaBuilder::Record {
-                        name: right_name,
-                        field_names: right_field_names,
-                        field_types: right_field_types,
-                        skippable: right_skippable,
-                        length: right_length,
-                    })
-                }
-            }
-            (
-                SchemaBuilder::Map(left_keys, left_values),
-                SchemaBuilder::Map(right_keys, right_values),
-            ) => {
-                left_keys.union(*right_keys);
-                left_values.union(*right_values);
-                Ok(())
-            }
-            (SchemaBuilder::Sequence(left), SchemaBuilder::Sequence(right)) => {
-                left.union(*right);
-                Ok(())
-            }
-            (left, right) => {
-                if *left == right {
-                    Ok(())
-                } else {
-                    Err(right)
-                }
-            }
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    #[inline]
-    fn union(&mut self, other: Self) {
-        if let Err(other) = self.unify(other) {
-            let left = std::mem::take(self);
-            match self {
-                SchemaBuilder::Union(schemas) => *schemas = vec![left, other],
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    fn add_to_nonempty_union(self, lefts: &mut Vec<SchemaBuilder>) {
-        assert!(!lefts.is_empty());
-        match self {
-            SchemaBuilder::Union(rights) => {
-                rights
-                    .into_iter()
-                    .for_each(|right| right.add_to_nonempty_union(lefts));
-            }
-            right => {
-                let right = lefts
-                    .iter_mut()
-                    .try_fold(right, |right, left| match left.unify(right) {
-                        Ok(()) => Err(()),
-                        Err(recovered) => Ok(recovered),
-                    })
-                    .ok();
-                lefts.extend(right);
-            }
-        }
-    }
-}
-
-impl Default for SchemaBuilder {
-    #[inline]
-    fn default() -> Self {
-        Self::Union(Vec::new())
-    }
-}
-
-impl SchemaBuilder {
-    fn build(self, root: &mut RootSchemaBuilder) -> Result<SchemaIndex, SerError> {
-        let schema = match self {
-            SchemaBuilder::Bool => Schema::Bool,
-            SchemaBuilder::I8 => Schema::I8,
-            SchemaBuilder::I16 => Schema::I16,
-            SchemaBuilder::I32 => Schema::I32,
-            SchemaBuilder::I64 => Schema::I64,
-            SchemaBuilder::I128 => Schema::I128,
-
-            SchemaBuilder::U8 => Schema::U8,
-            SchemaBuilder::U16 => Schema::U16,
-            SchemaBuilder::U32 => Schema::U32,
-            SchemaBuilder::U64 => Schema::U64,
-            SchemaBuilder::U128 => Schema::U128,
-
-            SchemaBuilder::F32 => Schema::F32,
-            SchemaBuilder::F64 => Schema::F64,
-            SchemaBuilder::Char => Schema::Char,
-
-            SchemaBuilder::String => Schema::String,
-            SchemaBuilder::Bytes => Schema::Bytes,
-
-            SchemaBuilder::OptionNone => Schema::OptionNone,
-            SchemaBuilder::OptionSome(inner) => {
-                let inner = inner.build(root)?;
-                Schema::OptionSome(inner)
-            }
-            SchemaBuilder::Unit(None) => Schema::Unit,
-            SchemaBuilder::Unit(Some(TypeName(name, None))) => Schema::UnitStruct(name),
-            SchemaBuilder::Unit(Some(TypeName(name, Some(variant)))) => {
-                Schema::UnitVariant(name, variant)
-            }
-            SchemaBuilder::Newtype(type_name, inner) => {
-                let inner = inner.build(root)?;
-                match type_name {
-                    TypeName(name, None) => Schema::NewtypeStruct(name, inner),
-                    TypeName(name, Some(variant)) => Schema::NewtypeVariant(name, variant, inner),
-                }
-            }
-            SchemaBuilder::Map(key, value) => Schema::Map(key.build(root)?, value.build(root)?),
-            SchemaBuilder::Sequence(item) => Schema::Sequence(item.build(root)?),
-            SchemaBuilder::Union(schemas) => {
-                let mut schemas = schemas
-                    .into_iter()
-                    .map(|schema| schema.build(root))
-                    .collect::<Result<Vec<_>, _>>()?;
-                schemas.sort_unstable();
-                schemas.dedup();
-                Schema::Union(root.schema_lists.intern_from(schemas)?)
-            }
-            SchemaBuilder::Record {
-                name,
-                field_names,
-                field_types,
-                length,
-                mut skippable,
-            } => {
-                skippable.retain(|&index| {
-                    !matches!(
-                        &field_types[usize::from(index)],
-                        SchemaBuilder::Union(variants) if variants.is_empty()
-                    )
-                });
-                let field_types = field_types
-                    .into_iter()
-                    .map(|schema| schema.build(root))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let field_types = root.schema_lists.intern_from(field_types)?;
-                match (name, field_names) {
-                    (None, None) => Schema::Tuple(length, field_types),
-                    (Some(TypeName(name, None)), None) => {
-                        Schema::TupleStruct(name, length, field_types)
-                    }
-                    (Some(TypeName(name, Some(variant))), None) => {
-                        Schema::TupleVariant(name, variant, length, field_types)
-                    }
-                    (None, Some(_field_names)) => {
-                        unreachable!("anonymous structs don't exist in rust!")
-                    }
-                    (Some(TypeName(name, None)), Some(field_names)) => {
-                        let skip_list = root.field_lists.intern_from(skippable)?;
-                        Schema::Struct(name, field_names, skip_list, field_types)
-                    }
-                    (Some(TypeName(name, Some(variant))), Some(field_names)) => {
-                        let skip_list = root.field_lists.intern_from(skippable)?;
-                        Schema::StructVariant(name, variant, field_names, skip_list, field_types)
-                    }
-                }
-            }
-        };
-        root.schemas.intern(schema)
-    }
-}
-
-impl RootSchemaBuilder {
-    pub(crate) fn new<ValueT>(value: &ValueT) -> Result<Self, SerError>
+    pub fn serialize_value<ValueT>(&mut self, value: &ValueT) -> Result<Value, SerError>
     where
-        ValueT: ?Sized + Serialize,
+        ValueT: Serialize,
     {
-        let mut this = Self::default();
-        let root = ValueT::serialize(value, &mut this)?;
-        this.root = root;
-        Ok(this)
+        let mut data = Vec::new();
+        let new_root = value.serialize(RootSerializer {
+            data: &mut data,
+            names: &mut self.names,
+            name_lists: &mut self.name_lists,
+            schemas: &mut self.nodes,
+            schema_lists: &mut self.node_lists,
+            field_lists: &mut self.field_lists,
+        })?;
+        self.root.union(new_root);
+        Ok(Value(data))
     }
 
-    pub(crate) fn into_value(mut self) -> Result<Value, SerError> {
-        let root = std::mem::take(&mut self.root);
-        let root_index = root.build(&mut self)?;
-        let schema = RootSchema {
-            schemas: self.schemas.into_iter().collect::<Vec<_>>().into(),
+    pub fn build(mut self) -> Result<Schema, SerError> {
+        let schema = Schema {
+            root_index: std::mem::take(&mut self.root).build(&mut self)?,
+            nodes: self.nodes.into_iter().collect::<Vec<_>>().into(),
             names: self
                 .names
                 .into_iter()
@@ -320,15 +62,34 @@ impl RootSchemaBuilder {
                 .collect::<Vec<_>>()
                 .into(),
             name_lists: self.name_lists.into_iter().collect::<Vec<_>>().into(),
-            schema_lists: self.schema_lists.into_iter().collect::<Vec<_>>().into(),
+            node_lists: self.node_lists.into_iter().collect::<Vec<_>>().into(),
             field_lists: self.field_lists.into_iter().collect::<Vec<_>>().into(),
         };
-        schema.dump(&mut String::new(), root_index).unwrap();
-        Ok(Value {
-            schema,
-            root_index,
-            data: ValueData(self.data),
-        })
+        schema.dump(&mut String::new(), schema.root_index).unwrap();
+        Ok(schema)
+    }
+}
+
+pub(crate) struct RootSerializer<'a> {
+    data: &'a mut Vec<u8>,
+    names: &'a mut Pool<&'static str, NameIndex>,
+    name_lists: &'a mut Pool<Box<[NameIndex]>, NameListIndex>,
+    schemas: &'a mut Pool<SchemaNode, SchemaNodeIndex>,
+    schema_lists: &'a mut Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
+    field_lists: &'a mut Pool<Box<[FieldIndex]>, FieldListIndex>,
+}
+
+impl RootSerializer<'_> {
+    #[inline]
+    fn reborrow<'b>(&'b mut self) -> RootSerializer<'b> where {
+        RootSerializer {
+            data: &mut self.data,
+            names: &mut self.names,
+            name_lists: &mut self.name_lists,
+            schemas: &mut self.schemas,
+            schema_lists: &mut self.schema_lists,
+            field_lists: &mut self.field_lists,
+        }
     }
 
     #[inline]
@@ -430,35 +191,313 @@ impl RootSchemaBuilder {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum SchemaBuilderNode {
+    Bool,
+
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+
+    F32,
+    F64,
+    Char,
+
+    String,
+    Bytes,
+
+    OptionNone,
+    OptionSome(Box<SchemaBuilderNode>),
+
+    Unit(Option<TypeName>),
+    Newtype(TypeName, Box<SchemaBuilderNode>),
+
+    Map(Box<SchemaBuilderNode>, Box<SchemaBuilderNode>),
+    Sequence(Box<SchemaBuilderNode>),
+
+    Union(Vec<SchemaBuilderNode>),
+
+    /// Tuple, tuple struct, tuple variant, struct or struct variant.
+    Record {
+        name: Option<TypeName>,
+        field_names: Option<NameListIndex>,
+        field_types: Vec<SchemaBuilderNode>,
+        skippable: Vec<FieldIndex>,
+        length: u32,
+    },
+}
+
+impl SchemaBuilderNode {
+    fn unify(&mut self, other: Self) -> Result<(), Self> {
+        match (&mut *self, other) {
+            (SchemaBuilderNode::Union(lefts), right) => {
+                if lefts.is_empty() {
+                    *self = right;
+                } else {
+                    right.add_to_nonempty_union(lefts);
+                }
+                Ok(())
+            }
+            (left, mut right @ SchemaBuilderNode::Union(_)) => {
+                std::mem::swap(left, &mut right);
+                left.unify(right)
+            }
+            (
+                SchemaBuilderNode::Newtype(left_name, left_inner),
+                SchemaBuilderNode::Newtype(right_name, right_inner),
+            ) => {
+                if *left_name == right_name {
+                    left_inner.union(*right_inner);
+                    Ok(())
+                } else {
+                    Err(SchemaBuilderNode::Newtype(right_name, right_inner))
+                }
+            }
+            (SchemaBuilderNode::OptionSome(left), SchemaBuilderNode::OptionSome(right)) => {
+                left.union(*right);
+                Ok(())
+            }
+            (
+                SchemaBuilderNode::Record {
+                    name: left_name,
+                    field_names: left_field_names,
+                    field_types: left_field_types,
+                    skippable: left_skippable,
+                    length: left_length,
+                },
+                SchemaBuilderNode::Record {
+                    name: right_name,
+                    field_names: right_field_names,
+                    field_types: right_field_types,
+                    skippable: right_skippable,
+                    length: right_length,
+                },
+            ) => {
+                if (*left_name, *left_field_names, *left_length)
+                    == (right_name, right_field_names, right_length)
+                {
+                    left_field_types
+                        .iter_mut()
+                        .zip(right_field_types)
+                        .for_each(|(left, right)| left.union(right));
+                    left_skippable.extend(right_skippable);
+                    left_skippable.sort_unstable();
+                    left_skippable.dedup();
+                    Ok(())
+                } else {
+                    Err(SchemaBuilderNode::Record {
+                        name: right_name,
+                        field_names: right_field_names,
+                        field_types: right_field_types,
+                        skippable: right_skippable,
+                        length: right_length,
+                    })
+                }
+            }
+            (
+                SchemaBuilderNode::Map(left_keys, left_values),
+                SchemaBuilderNode::Map(right_keys, right_values),
+            ) => {
+                left_keys.union(*right_keys);
+                left_values.union(*right_values);
+                Ok(())
+            }
+            (SchemaBuilderNode::Sequence(left), SchemaBuilderNode::Sequence(right)) => {
+                left.union(*right);
+                Ok(())
+            }
+            (left, right) => {
+                if *left == right {
+                    Ok(())
+                } else {
+                    Err(right)
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn union(&mut self, other: Self) {
+        if let Err(other) = self.unify(other) {
+            let left = std::mem::take(self);
+            match self {
+                SchemaBuilderNode::Union(schemas) => *schemas = vec![left, other],
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn add_to_nonempty_union(self, lefts: &mut Vec<SchemaBuilderNode>) {
+        assert!(!lefts.is_empty());
+        match self {
+            SchemaBuilderNode::Union(rights) => {
+                rights
+                    .into_iter()
+                    .for_each(|right| right.add_to_nonempty_union(lefts));
+            }
+            right => {
+                let right = lefts
+                    .iter_mut()
+                    .try_fold(right, |right, left| match left.unify(right) {
+                        Ok(()) => Err(()),
+                        Err(recovered) => Ok(recovered),
+                    })
+                    .ok();
+                lefts.extend(right);
+            }
+        }
+    }
+}
+
+impl Default for SchemaBuilderNode {
+    #[inline]
+    fn default() -> Self {
+        Self::Union(Vec::new())
+    }
+}
+
+impl SchemaBuilderNode {
+    fn build(self, builder: &mut SchemaBuilder) -> Result<SchemaNodeIndex, SerError> {
+        let built = match self {
+            SchemaBuilderNode::Bool => SchemaNode::Bool,
+            SchemaBuilderNode::I8 => SchemaNode::I8,
+            SchemaBuilderNode::I16 => SchemaNode::I16,
+            SchemaBuilderNode::I32 => SchemaNode::I32,
+            SchemaBuilderNode::I64 => SchemaNode::I64,
+            SchemaBuilderNode::I128 => SchemaNode::I128,
+
+            SchemaBuilderNode::U8 => SchemaNode::U8,
+            SchemaBuilderNode::U16 => SchemaNode::U16,
+            SchemaBuilderNode::U32 => SchemaNode::U32,
+            SchemaBuilderNode::U64 => SchemaNode::U64,
+            SchemaBuilderNode::U128 => SchemaNode::U128,
+
+            SchemaBuilderNode::F32 => SchemaNode::F32,
+            SchemaBuilderNode::F64 => SchemaNode::F64,
+            SchemaBuilderNode::Char => SchemaNode::Char,
+
+            SchemaBuilderNode::String => SchemaNode::String,
+            SchemaBuilderNode::Bytes => SchemaNode::Bytes,
+
+            SchemaBuilderNode::OptionNone => SchemaNode::OptionNone,
+            SchemaBuilderNode::OptionSome(inner) => {
+                let inner = inner.build(builder)?;
+                SchemaNode::OptionSome(inner)
+            }
+            SchemaBuilderNode::Unit(None) => SchemaNode::Unit,
+            SchemaBuilderNode::Unit(Some(TypeName(name, None))) => SchemaNode::UnitStruct(name),
+            SchemaBuilderNode::Unit(Some(TypeName(name, Some(variant)))) => {
+                SchemaNode::UnitVariant(name, variant)
+            }
+            SchemaBuilderNode::Newtype(type_name, inner) => {
+                let inner = inner.build(builder)?;
+                match type_name {
+                    TypeName(name, None) => SchemaNode::NewtypeStruct(name, inner),
+                    TypeName(name, Some(variant)) => {
+                        SchemaNode::NewtypeVariant(name, variant, inner)
+                    }
+                }
+            }
+            SchemaBuilderNode::Map(key, value) => {
+                SchemaNode::Map(key.build(builder)?, value.build(builder)?)
+            }
+            SchemaBuilderNode::Sequence(item) => SchemaNode::Sequence(item.build(builder)?),
+            SchemaBuilderNode::Union(variants) => {
+                let mut variants = variants
+                    .into_iter()
+                    .map(|variant| variant.build(builder))
+                    .collect::<Result<Vec<_>, _>>()?;
+                variants.sort_unstable();
+                variants.dedup();
+                SchemaNode::Union(builder.node_lists.intern_from(variants)?)
+            }
+            SchemaBuilderNode::Record {
+                name,
+                field_names,
+                field_types,
+                length,
+                mut skippable,
+            } => {
+                skippable.retain(|&index| {
+                    !matches!(
+                        &field_types[usize::from(index)],
+                        SchemaBuilderNode::Union(variants) if variants.is_empty()
+                    )
+                });
+                let field_types = field_types
+                    .into_iter()
+                    .map(|field_type| field_type.build(builder))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let field_types = builder.node_lists.intern_from(field_types)?;
+                match (name, field_names) {
+                    (None, None) => SchemaNode::Tuple(length, field_types),
+                    (Some(TypeName(name, None)), None) => {
+                        SchemaNode::TupleStruct(name, length, field_types)
+                    }
+                    (Some(TypeName(name, Some(variant))), None) => {
+                        SchemaNode::TupleVariant(name, variant, length, field_types)
+                    }
+                    (None, Some(_field_names)) => {
+                        unreachable!("anonymous structs don't exist in rust!")
+                    }
+                    (Some(TypeName(name, None)), Some(field_names)) => {
+                        let skip_list = builder.field_lists.intern_from(skippable)?;
+                        SchemaNode::Struct(name, field_names, skip_list, field_types)
+                    }
+                    (Some(TypeName(name, Some(variant))), Some(field_names)) => {
+                        let skip_list = builder.field_lists.intern_from(skippable)?;
+                        SchemaNode::StructVariant(
+                            name,
+                            variant,
+                            field_names,
+                            skip_list,
+                            field_types,
+                        )
+                    }
+                }
+            }
+        };
+        builder.nodes.intern(built)
+    }
+}
+
 macro_rules! fn_serialize_as_u8 {
-    ($(($fn_name:ident, $value_type:ty, $schema:ident),)+) => {
+    ($(($fn_name:ident, $value_type:ty, $node:ident),)+) => {
         $(
             #[inline]
-            fn $fn_name(self, value: $value_type) -> Result<Self::Ok, Self::Error> {
-                self.push_trace(Trace::$schema);
+            fn $fn_name(mut self, value: $value_type) -> Result<Self::Ok, Self::Error> {
+                self.push_trace(Trace::$node);
                 self.data.push(value as u8);
-                Ok(SchemaBuilder::$schema)
+                Ok(SchemaBuilderNode::$node)
             }
         )+
     };
 }
 
 macro_rules! fn_serialize_as_le_bytes {
-    ($(($fn_name:ident, $value_type:ty, $schema:ident ),)+) => {
+    ($(($fn_name:ident, $value_type:ty, $node:ident ),)+) => {
         $(
             #[inline]
-            fn $fn_name(self, value: $value_type) -> Result<Self::Ok, Self::Error> {
+            fn $fn_name(mut self, value: $value_type) -> Result<Self::Ok, Self::Error> {
 
-                self.push_trace(Trace::$schema);
+                self.push_trace(Trace::$node);
                 self.data.extend_from_slice(&value.to_le_bytes());
-                Ok(SchemaBuilder::$schema)
+                Ok(SchemaBuilderNode::$node)
             }
         )+
     };
 }
 
-impl<'a> Serializer for &'a mut RootSchemaBuilder {
-    type Ok = SchemaBuilder;
+impl<'a> Serializer for RootSerializer<'a> {
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     type SerializeSeq = SequenceSchemaBuilder<'a>;
@@ -489,69 +528,69 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
     }
 
     #[inline]
-    fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+    fn serialize_char(mut self, value: char) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::Char);
         self.push_u32(u32::from(value));
-        Ok(SchemaBuilder::Char)
+        Ok(SchemaBuilderNode::Char)
     }
 
     #[inline]
-    fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+    fn serialize_str(mut self, value: &str) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::String);
         self.push_length_bytes(value.as_bytes())?;
-        Ok(SchemaBuilder::String)
+        Ok(SchemaBuilderNode::String)
     }
 
     #[inline]
-    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
+    fn serialize_bytes(mut self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::Bytes);
         self.push_length_bytes(value)?;
-        Ok(SchemaBuilder::Bytes)
+        Ok(SchemaBuilderNode::Bytes)
     }
 
     #[inline]
-    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+    fn serialize_none(mut self) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::OptionNone);
-        Ok(SchemaBuilder::OptionNone)
+        Ok(SchemaBuilderNode::OptionNone)
     }
 
     #[inline]
-    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    fn serialize_some<T>(mut self, value: &T) -> Result<Self::Ok, Self::Error>
     where
         T: ?Sized + Serialize,
     {
         self.push_trace(Trace::OptionSome);
-        T::serialize(value, &mut *self).map(|schema| SchemaBuilder::OptionSome(Box::new(schema)))
+        T::serialize(value, self).map(|inner| SchemaBuilderNode::OptionSome(Box::new(inner)))
     }
 
     #[inline]
-    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+    fn serialize_unit(mut self) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::Unit);
-        Ok(SchemaBuilder::Unit(None))
+        Ok(SchemaBuilderNode::Unit(None))
     }
 
     #[inline]
-    fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
+    fn serialize_unit_struct(mut self, name: &'static str) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::UnitStruct);
-        Ok(SchemaBuilder::Unit(Some(self.push_struct_name(name)?)))
+        Ok(SchemaBuilderNode::Unit(Some(self.push_struct_name(name)?)))
     }
 
     #[inline]
     fn serialize_unit_variant(
-        self,
+        mut self,
         name: &'static str,
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok, Self::Error> {
         self.push_trace(Trace::UnitVariant);
-        Ok(SchemaBuilder::Unit(Some(
+        Ok(SchemaBuilderNode::Unit(Some(
             self.push_variant_name(name, variant)?,
         )))
     }
 
     #[inline]
     fn serialize_newtype_struct<T>(
-        self,
+        mut self,
         name: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error>
@@ -559,15 +598,15 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
         T: ?Sized + Serialize,
     {
         self.push_trace(Trace::NewtypeStruct);
-        Ok(SchemaBuilder::Newtype(
+        Ok(SchemaBuilderNode::Newtype(
             self.push_struct_name(name)?,
-            Box::new(T::serialize(value, &mut *self)?),
+            Box::new(T::serialize(value, self)?),
         ))
     }
 
     #[inline]
     fn serialize_newtype_variant<T>(
-        self,
+        mut self,
         name: &'static str,
         _variant_index: u32,
         variant: &'static str,
@@ -577,25 +616,25 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
         T: ?Sized + Serialize,
     {
         self.push_trace(Trace::NewtypeVariant);
-        Ok(SchemaBuilder::Newtype(
+        Ok(SchemaBuilderNode::Newtype(
             self.push_variant_name(name, variant)?,
-            Box::new(T::serialize(value, &mut *self)?),
+            Box::new(T::serialize(value, self)?),
         ))
     }
 
     #[inline]
-    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+    fn serialize_seq(mut self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         self.push_trace(Trace::Sequence);
         Ok(SequenceSchemaBuilder {
             reserved_length: self.reserve_u32()?,
-            schema: SchemaBuilder::default(),
+            item: SchemaBuilderNode::default(),
             length: 0,
             parent: self,
         })
     }
 
     #[inline]
-    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+    fn serialize_tuple(mut self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         self.push_trace(Trace::Tuple);
         self.push_u32_length(len)?;
         Ok(TupleSchemaBuilder {
@@ -608,7 +647,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
 
     #[inline]
     fn serialize_tuple_struct(
-        self,
+        mut self,
         name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
@@ -624,7 +663,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
 
     #[inline]
     fn serialize_tuple_variant(
-        self,
+        mut self,
         name: &'static str,
         _variant_index: u32,
         variant: &'static str,
@@ -641,12 +680,12 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
     }
 
     #[inline]
-    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+    fn serialize_map(mut self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         self.push_trace(Trace::Map);
         Ok(MapSchemaBuilder {
             reserved_length: self.reserve_u32()?,
-            key_schema: SchemaBuilder::default(),
-            value_schema: SchemaBuilder::default(),
+            key_schema: SchemaBuilderNode::default(),
+            value_schema: SchemaBuilderNode::default(),
             length: 0,
             parent: self,
         })
@@ -654,7 +693,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
 
     #[inline]
     fn serialize_struct(
-        self,
+        mut self,
         name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
@@ -664,7 +703,7 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
 
     #[inline]
     fn serialize_struct_variant(
-        self,
+        mut self,
         name: &'static str,
         _variant_index: u32,
         variant: &'static str,
@@ -681,44 +720,49 @@ impl<'a> Serializer for &'a mut RootSchemaBuilder {
 }
 
 pub(crate) struct SequenceSchemaBuilder<'a> {
-    parent: &'a mut RootSchemaBuilder,
+    parent: RootSerializer<'a>,
     reserved_length: TraceIndex,
-    schema: SchemaBuilder,
+    item: SchemaBuilderNode,
     length: u32,
 }
 
-impl SerializeSeq for SequenceSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+impl<'a> SerializeSeq for SequenceSchemaBuilder<'a> {
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
-    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    fn serialize_element<'b, T>(&'b mut self, value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + serde::Serialize,
     {
         self.length += 1;
-        self.schema.union(T::serialize(value, &mut *self.parent)?);
+        let new_schema = {
+            let parent = self.parent.reborrow();
+            let new_schema = T::serialize(value, parent)?;
+            new_schema
+        };
+        self.item.union(new_schema);
         Ok(())
     }
 
     #[inline]
-    fn end(self) -> Result<Self::Ok, Self::Error> {
+    fn end(mut self) -> Result<Self::Ok, Self::Error> {
         self.parent
             .fill_reserved_bytes(self.reserved_length, &self.length.to_le_bytes());
-        Ok(SchemaBuilder::Sequence(Box::new(self.schema)))
+        Ok(SchemaBuilderNode::Sequence(Box::new(self.item)))
     }
 }
 
 pub(crate) struct MapSchemaBuilder<'a> {
-    parent: &'a mut RootSchemaBuilder,
+    parent: RootSerializer<'a>,
     reserved_length: TraceIndex,
-    key_schema: SchemaBuilder,
-    value_schema: SchemaBuilder,
+    key_schema: SchemaBuilderNode,
+    value_schema: SchemaBuilderNode,
     length: u32,
 }
 
 impl SerializeMap for MapSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
@@ -727,7 +771,8 @@ impl SerializeMap for MapSchemaBuilder<'_> {
         T: ?Sized + serde::Serialize,
     {
         self.length += 1;
-        self.key_schema.union(T::serialize(key, &mut *self.parent)?);
+        self.key_schema
+            .union(T::serialize(key, self.parent.reborrow())?);
         Ok(())
     }
 
@@ -737,15 +782,15 @@ impl SerializeMap for MapSchemaBuilder<'_> {
         T: ?Sized + serde::Serialize,
     {
         self.value_schema
-            .union(T::serialize(value, &mut *self.parent)?);
+            .union(T::serialize(value, self.parent.reborrow())?);
         Ok(())
     }
 
     #[inline]
-    fn end(self) -> Result<Self::Ok, Self::Error> {
+    fn end(mut self) -> Result<Self::Ok, Self::Error> {
         self.parent
             .fill_reserved_bytes(self.reserved_length, &self.length.to_le_bytes());
-        Ok(SchemaBuilder::Map(
+        Ok(SchemaBuilderNode::Map(
             Box::new(self.key_schema),
             Box::new(self.value_schema),
         ))
@@ -753,14 +798,14 @@ impl SerializeMap for MapSchemaBuilder<'_> {
 }
 
 pub(crate) struct TupleSchemaBuilder<'a> {
+    parent: RootSerializer<'a>,
     name: Option<TypeName>,
-    schemas: Vec<SchemaBuilder>,
-    parent: &'a mut RootSchemaBuilder,
+    schemas: Vec<SchemaBuilderNode>,
     length: u32,
 }
 
 impl SerializeTuple for TupleSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
@@ -768,13 +813,14 @@ impl SerializeTuple for TupleSchemaBuilder<'_> {
     where
         T: ?Sized + serde::Serialize,
     {
-        self.schemas.push(T::serialize(value, &mut *self.parent)?);
+        self.schemas
+            .push(T::serialize(value, self.parent.reborrow())?);
         Ok(())
     }
 
     #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        Ok(SchemaBuilder::Record {
+        Ok(SchemaBuilderNode::Record {
             name: self.name,
             field_names: None,
             field_types: self.schemas,
@@ -785,7 +831,7 @@ impl SerializeTuple for TupleSchemaBuilder<'_> {
 }
 
 impl SerializeTupleStruct for TupleSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
@@ -803,7 +849,7 @@ impl SerializeTupleStruct for TupleSchemaBuilder<'_> {
 }
 
 impl SerializeTupleVariant for TupleSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
@@ -821,20 +867,20 @@ impl SerializeTupleVariant for TupleSchemaBuilder<'_> {
 }
 
 pub(crate) struct StructSchemaBuilder<'a> {
+    parent: RootSerializer<'a>,
     name: TypeName,
     reserved_field_name_list: TraceIndex,
     reserved_field_presence: TraceIndex,
     field_names: Vec<NameIndex>,
-    field_types: Vec<SchemaBuilder>,
+    field_types: Vec<SchemaBuilderNode>,
     skipped: Vec<FieldIndex>,
-    parent: &'a mut RootSchemaBuilder,
 }
 
 impl<'a> StructSchemaBuilder<'a> {
     pub fn new(
         name: TypeName,
         length: usize,
-        parent: &'a mut RootSchemaBuilder,
+        mut parent: RootSerializer<'a>,
     ) -> Result<Self, SerError> {
         let reserved_field_name_list = parent.reserve_u32()?;
         parent.push_u32_length(length)?;
@@ -851,7 +897,7 @@ impl<'a> StructSchemaBuilder<'a> {
 }
 
 impl SerializeStruct for StructSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]
@@ -865,7 +911,7 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
         )?;
         self.field_names.push(self.parent.intern_field_name(key)?);
         self.field_types
-            .push(T::serialize(value, &mut *self.parent)?);
+            .push(T::serialize(value, self.parent.reborrow())?);
         Ok(())
     }
 
@@ -873,18 +919,18 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
         self.skipped.push(self.field_names.len().try_into()?);
         self.field_names.push(self.parent.intern_field_name(key)?);
-        self.field_types.push(SchemaBuilder::default());
+        self.field_types.push(SchemaBuilderNode::default());
         Ok(())
     }
 
     #[inline]
-    fn end(self) -> Result<Self::Ok, Self::Error> {
+    fn end(mut self) -> Result<Self::Ok, Self::Error> {
         let length = u32::try_from(self.field_names.len()).map_err(|_| SerError::TooManyValues)?;
         let field_names = Some(
             self.parent
                 .fill_reserved_field_name_list(self.reserved_field_name_list, self.field_names)?,
         );
-        Ok(SchemaBuilder::Record {
+        Ok(SchemaBuilderNode::Record {
             name: Some(self.name),
             field_names,
             field_types: self.field_types,
@@ -895,7 +941,7 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
 }
 
 impl SerializeStructVariant for StructSchemaBuilder<'_> {
-    type Ok = SchemaBuilder;
+    type Ok = SchemaBuilderNode;
     type Error = SerError;
 
     #[inline]

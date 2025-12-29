@@ -8,14 +8,33 @@ use serde::{
 use std::marker::PhantomData;
 
 use crate::{
-    Described, DescribedElsewhere, RootSchema,
+    Schema,
     anonymous_union::{UNION_ENUM_NAME, deserialized_anonymous_variants},
     deferred::{self, CallResult, CallValue, CanonicalVisit, DeferredDeserialize},
-    indices::{FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaIndex, SchemaListIndex},
-    schema::Schema,
+    described::{DescribedBy, SeedDescribedBy, SeedSelfDescribed, SelfDescribed},
+    indices::{
+        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
+    },
+    schema::SchemaNode,
 };
 
-impl<'de, T> Deserialize<'de> for Described<T>
+impl Schema {
+    pub fn describe_seed<'schema, 'de, SeedT>(
+        &'schema self,
+        seed: SeedT,
+    ) -> SeedDescribedBy<'schema, SeedT>
+    where
+        SeedT: DeserializeSeed<'de>,
+    {
+        SeedDescribedBy(seed, self)
+    }
+
+    pub fn describe<'schema, 'de, T>(&'schema self) -> SeedDescribedBy<'schema, PhantomData<T>> {
+        SeedDescribedBy(PhantomData, self)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for SelfDescribed<T>
 where
     T: Deserialize<'de>,
 {
@@ -24,12 +43,27 @@ where
     where
         D: Deserializer<'de>,
     {
-        struct SchemaPairVisitor<T>(PhantomData<T>);
-        impl<'de, T> serde::de::Visitor<'de> for SchemaPairVisitor<T>
+        SeedSelfDescribed(PhantomData).deserialize(deserializer)
+    }
+}
+
+impl<'de, SeedT> DeserializeSeed<'de> for SeedSelfDescribed<SeedT>
+where
+    SeedT: DeserializeSeed<'de>,
+{
+    type Value = SelfDescribed<SeedT::Value>;
+
+    #[inline]
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SchemaPairVisitor<SeedT>(SeedT);
+        impl<'de, SeedT> serde::de::Visitor<'de> for SchemaPairVisitor<SeedT>
         where
-            T: Deserialize<'de>,
+            SeedT: DeserializeSeed<'de>,
         {
-            type Value = Described<T>;
+            type Value = SelfDescribed<SeedT::Value>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(
@@ -44,41 +78,42 @@ where
                 A: serde::de::SeqAccess<'de>,
             {
                 let schema = seq
-                    .next_element::<RootSchema>()?
+                    .next_element::<Schema>()?
                     .ok_or_else(|| A::Error::invalid_length(0, &self))?;
 
-                Ok(Described(
-                    seq.next_element_seed(DescribedElsewhere(&schema, self.0))?
+                Ok(SelfDescribed(
+                    seq.next_element_seed(SeedDescribedBy(self.0, &schema))?
                         .ok_or_else(|| {
                             A::Error::custom(
                                 "missing described-elsewhere pair in described object pair",
                             )
-                        })?,
+                        })?
+                        .0,
                 ))
             }
         }
 
-        deserializer.deserialize_tuple(2, SchemaPairVisitor(PhantomData))
+        deserializer.deserialize_tuple(2, SchemaPairVisitor(self.0))
     }
 }
 
-impl<'de, 'schema, T> DeserializeSeed<'de> for DescribedElsewhere<'schema, T>
+impl<'de, 'schema, SeedT> DeserializeSeed<'de> for SeedDescribedBy<'schema, SeedT>
 where
-    T: Deserialize<'de>,
+    SeedT: DeserializeSeed<'de>,
 {
-    type Value = T;
+    type Value = DescribedBy<'schema, SeedT::Value>;
 
     #[inline]
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct Visitor<'schema, T>(DescribedElsewhere<'schema, T>);
-        impl<'de, 'schema, T> serde::de::Visitor<'de> for Visitor<'schema, T>
+        struct Visitor<'schema, SeedT>(SeedT, &'schema Schema);
+        impl<'de, 'schema, SeedT> serde::de::Visitor<'de> for Visitor<'schema, SeedT>
         where
-            T: Deserialize<'de>,
+            SeedT: DeserializeSeed<'de>,
         {
-            type Value = T;
+            type Value = SeedT::Value;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(
@@ -93,12 +128,12 @@ where
                 A: serde::de::SeqAccess<'de>,
             {
                 let schema = seq
-                    .next_element::<SchemaIndex>()?
+                    .next_element::<SchemaNodeIndex>()?
                     .ok_or_else(|| A::Error::invalid_length(0, &self))?;
                 let seed = SchemaDeserializer {
-                    root: (self.0).0,
-                    schema: (self.0).0.schema(schema).map_err(A::Error::custom)?,
-                    inner: (self.0).1,
+                    schema: self.1,
+                    node: self.1.node(schema).map_err(A::Error::custom)?,
+                    inner: self.0,
                 };
                 seq.next_element_seed(seed)?.ok_or_else(|| {
                     A::Error::custom("missing object data in described-elsewhere object")
@@ -106,26 +141,29 @@ where
             }
         }
 
-        deserializer.deserialize_tuple(2, Visitor(self))
+        Ok(DescribedBy(
+            deserializer.deserialize_tuple(2, Visitor(self.0, self.1))?,
+            self.1,
+        ))
     }
 }
 
 #[derive(Copy, Clone)]
 pub(crate) struct SchemaDeserializer<'schema, InnerT> {
-    root: &'schema RootSchema,
-    schema: Schema,
+    schema: &'schema Schema,
+    node: SchemaNode,
     inner: InnerT,
 }
 
 impl<'schema, InnerT> SchemaDeserializer<'schema, InnerT> {
     #[inline]
-    fn forward<ErrorT>(self, schema: SchemaIndex) -> Result<Self, ErrorT>
+    fn forward<ErrorT>(self, node: SchemaNodeIndex) -> Result<Self, ErrorT>
     where
         ErrorT: serde::de::Error,
     {
         Ok(Self {
-            root: self.root,
-            schema: self.root.schema(schema).map_err(ErrorT::custom)?,
+            schema: self.schema,
+            node: self.schema.node(node).map_err(ErrorT::custom)?,
             inner: self.inner,
         })
     }
@@ -143,8 +181,8 @@ where
         D: Deserializer<'de>,
     {
         self.inner.deserialize(SchemaDeserializer {
-            root: self.root,
             schema: self.schema,
+            node: self.node,
             inner: deserializer,
         })
     }
@@ -157,17 +195,17 @@ where
     #[inline]
     fn do_deserialize_seq<VisitorT>(
         self,
-        item: SchemaIndex,
+        item: SchemaNodeIndex,
         visitor: VisitorT,
     ) -> Result<VisitorT::Value, DeserializerT::Error>
     where
         VisitorT: serde::de::Visitor<'de>,
     {
         self.inner.deserialize_seq(SchemaSeqDeserializer {
-            root: self.root,
+            schema: self.schema,
             item: self
-                .root
-                .schema(item)
+                .schema
+                .node(item)
                 .map_err(DeserializerT::Error::custom)?,
             inner: visitor,
         })
@@ -176,20 +214,20 @@ where
     #[inline]
     fn do_deserialize_tuple<VisitorT>(
         self,
-        field_schemas: SchemaListIndex,
+        field_types: SchemaNodeListIndex,
         visitor: VisitorT,
     ) -> Result<VisitorT::Value, DeserializerT::Error>
     where
         VisitorT: serde::de::Visitor<'de>,
     {
         let items = self
-            .root
-            .schema_list(field_schemas)
+            .schema
+            .node_list(field_types)
             .map_err(DeserializerT::Error::custom)?;
         self.inner.deserialize_tuple(
             items.len(),
             SchemaTupleDeserializer {
-                root: self.root,
+                schema: self.schema,
                 items,
                 inner: visitor,
             },
@@ -199,22 +237,22 @@ where
     #[inline]
     fn do_deserialize_map<VisitorT>(
         self,
-        key: SchemaIndex,
-        value: SchemaIndex,
+        key: SchemaNodeIndex,
+        value: SchemaNodeIndex,
         visitor: VisitorT,
     ) -> Result<VisitorT::Value, DeserializerT::Error>
     where
         VisitorT: serde::de::Visitor<'de>,
     {
         self.inner.deserialize_map(SchemaMapDeserializer {
-            root: self.root,
+            schema: self.schema,
             key: self
-                .root
-                .schema(key)
+                .schema
+                .node(key)
                 .map_err(DeserializerT::Error::custom)?,
             value: self
-                .root
-                .schema(value)
+                .schema
+                .node(value)
                 .map_err(DeserializerT::Error::custom)?,
             inner: visitor,
         })
@@ -225,30 +263,30 @@ where
         self,
         field_names: NameListIndex,
         skip_list: FieldListIndex,
-        field_schemas: SchemaListIndex,
+        field_types: SchemaNodeListIndex,
         visitor: VisitorT,
     ) -> Result<VisitorT::Value, DeserializerT::Error>
     where
         VisitorT: serde::de::Visitor<'de>,
     {
-        SchemaStructDeserializer::new(self.root, field_names, skip_list, field_schemas, visitor)?
+        SchemaStructDeserializer::new(self.schema, field_names, skip_list, field_types, visitor)?
             .deserialize(self.inner)
     }
 
     #[inline]
     fn deserialize_if<CallT>(
         self,
-        condition: impl FnOnce(Schema) -> bool,
+        condition: impl FnOnce(SchemaNode) -> bool,
         call: CallT,
     ) -> CallResult<'de, CallT, DeserializerT>
     where
         CallT: DeferredDeserialize<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => self.deserialize_union(variants, call),
-            Schema::OptionSome(inner)
-            | Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
+        match self.node {
+            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
             actual if condition(actual) => call.call(self.inner),
             _ => self.invalid_type_error(&call),
         }
@@ -264,13 +302,13 @@ where
         CallT: CanonicalVisit<'de>,
         CallT::CanonicalInput: From<f32>,
     {
-        match self.schema {
-            Schema::Union(variants) => self.deserialize_union(variants, call),
-            Schema::OptionSome(inner)
-            | Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
-            Schema::F32 => call.canonical_visit(f32::deserialize(self.inner)?.into()),
-            Schema::F64 => call.canonical_visit(convert_f64(f64::deserialize(self.inner)?)),
+        match self.node {
+            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
+            SchemaNode::F32 => call.canonical_visit(f32::deserialize(self.inner)?.into()),
+            SchemaNode::F64 => call.canonical_visit(convert_f64(f64::deserialize(self.inner)?)),
             _ => self.invalid_type_error(&call),
         }
     }
@@ -308,23 +346,25 @@ where
             };
         }
 
-        match self.schema {
-            Schema::Union(variants) => self.deserialize_union(variants, call),
-            Schema::OptionSome(inner)
-            | Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
+        match self.node {
+            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
 
-            Schema::I8 => integer_conversion!(i8, visit_i8, Signed),
-            Schema::I16 => integer_conversion!(i16, visit_i16, Signed),
-            Schema::I32 => integer_conversion!(i32, visit_i32, Signed),
-            Schema::I64 => integer_conversion!(i64, visit_i64, Signed),
-            Schema::I128 => integer_conversion!(i128, visit_i128, Other("128-bit signed integer")),
+            SchemaNode::I8 => integer_conversion!(i8, visit_i8, Signed),
+            SchemaNode::I16 => integer_conversion!(i16, visit_i16, Signed),
+            SchemaNode::I32 => integer_conversion!(i32, visit_i32, Signed),
+            SchemaNode::I64 => integer_conversion!(i64, visit_i64, Signed),
+            SchemaNode::I128 => {
+                integer_conversion!(i128, visit_i128, Other("128-bit signed integer"))
+            }
 
-            Schema::U8 => integer_conversion!(u8, visit_u8, Unsigned),
-            Schema::U16 => integer_conversion!(u16, visit_u16, Unsigned),
-            Schema::U32 => integer_conversion!(u32, visit_u32, Unsigned),
-            Schema::U64 => integer_conversion!(u64, visit_u64, Unsigned),
-            Schema::U128 => {
+            SchemaNode::U8 => integer_conversion!(u8, visit_u8, Unsigned),
+            SchemaNode::U16 => integer_conversion!(u16, visit_u16, Unsigned),
+            SchemaNode::U32 => integer_conversion!(u32, visit_u32, Unsigned),
+            SchemaNode::U64 => integer_conversion!(u64, visit_u64, Unsigned),
+            SchemaNode::U128 => {
                 integer_conversion!(u128, visit_u128, Other("128-bit unsigned integer"))
             }
 
@@ -335,13 +375,13 @@ where
     #[inline]
     fn deserialize_union<CallT>(
         self,
-        variants: SchemaListIndex,
+        variants: SchemaNodeListIndex,
         call: CallT,
     ) -> CallResult<'de, CallT, DeserializerT>
     where
         CallT: DeferredDeserialize<'de>,
     {
-        struct UnionVisitor<'schema, CallT>(&'schema RootSchema, &'schema [SchemaIndex], CallT);
+        struct UnionVisitor<'schema, CallT>(&'schema Schema, &'schema [SchemaNodeIndex], CallT);
 
         impl<'de, 'schema, CallT> serde::de::Visitor<'de> for UnionVisitor<'schema, CallT>
         where
@@ -372,7 +412,7 @@ where
             }
         }
 
-        struct ResolvedUnion<'schema, CallT>(&'schema RootSchema, SchemaIndex, CallT);
+        struct ResolvedUnion<'schema, CallT>(&'schema Schema, SchemaNodeIndex, CallT);
 
         impl<'de, 'schema, CallT> DeserializeSeed<'de> for ResolvedUnion<'schema, CallT>
         where
@@ -386,71 +426,71 @@ where
                 D: Deserializer<'de>,
             {
                 self.2.call(SchemaDeserializer {
-                    root: self.0,
-                    schema: self.0.schema(self.1).map_err(D::Error::custom)?,
+                    schema: self.0,
+                    node: self.0.node(self.1).map_err(D::Error::custom)?,
                     inner: deserializer,
                 })
             }
         }
 
-        let schema_list = self
-            .root
-            .schema_list(variants)
+        let variants = self
+            .schema
+            .node_list(variants)
             .map_err(DeserializerT::Error::custom)?;
         self.inner.deserialize_enum(
             UNION_ENUM_NAME,
-            deserialized_anonymous_variants(schema_list.len())?,
-            UnionVisitor(self.root, schema_list, call),
+            deserialized_anonymous_variants(variants.len())?,
+            UnionVisitor(self.schema, variants, call),
         )
     }
 
     fn unexpected(self) -> Result<Unexpected<'de>, DeserializerT::Error> {
-        Ok(match self.schema {
-            Schema::Bool => Unexpected::Bool(bool::deserialize(self.inner)?),
+        Ok(match self.node {
+            SchemaNode::Bool => Unexpected::Bool(bool::deserialize(self.inner)?),
 
-            Schema::I8 => Unexpected::Signed(i64::from(i8::deserialize(self.inner)?)),
-            Schema::I16 => Unexpected::Signed(i64::from(i16::deserialize(self.inner)?)),
-            Schema::I32 => Unexpected::Signed(i64::from(i32::deserialize(self.inner)?)),
-            Schema::I64 => Unexpected::Signed(i64::deserialize(self.inner)?),
-            Schema::I128 => Unexpected::Other("128-bit signed integer"),
+            SchemaNode::I8 => Unexpected::Signed(i64::from(i8::deserialize(self.inner)?)),
+            SchemaNode::I16 => Unexpected::Signed(i64::from(i16::deserialize(self.inner)?)),
+            SchemaNode::I32 => Unexpected::Signed(i64::from(i32::deserialize(self.inner)?)),
+            SchemaNode::I64 => Unexpected::Signed(i64::deserialize(self.inner)?),
+            SchemaNode::I128 => Unexpected::Other("128-bit signed integer"),
 
-            Schema::U8 => Unexpected::Unsigned(u64::from(u8::deserialize(self.inner)?)),
-            Schema::U16 => Unexpected::Unsigned(u64::from(u16::deserialize(self.inner)?)),
-            Schema::U32 => Unexpected::Unsigned(u64::from(u32::deserialize(self.inner)?)),
-            Schema::U64 => Unexpected::Unsigned(u64::deserialize(self.inner)?),
-            Schema::U128 => Unexpected::Other("128-bit unsigned integer"),
+            SchemaNode::U8 => Unexpected::Unsigned(u64::from(u8::deserialize(self.inner)?)),
+            SchemaNode::U16 => Unexpected::Unsigned(u64::from(u16::deserialize(self.inner)?)),
+            SchemaNode::U32 => Unexpected::Unsigned(u64::from(u32::deserialize(self.inner)?)),
+            SchemaNode::U64 => Unexpected::Unsigned(u64::deserialize(self.inner)?),
+            SchemaNode::U128 => Unexpected::Other("128-bit unsigned integer"),
 
-            Schema::F32 => Unexpected::Float(f64::from(f32::deserialize(self.inner)?)),
-            Schema::F64 => Unexpected::Float(f64::deserialize(self.inner)?),
-            Schema::Char => Unexpected::Char(char::deserialize(self.inner)?),
+            SchemaNode::F32 => Unexpected::Float(f64::from(f32::deserialize(self.inner)?)),
+            SchemaNode::F64 => Unexpected::Float(f64::deserialize(self.inner)?),
+            SchemaNode::Char => Unexpected::Char(char::deserialize(self.inner)?),
 
-            Schema::String => <&'de str>::deserialize(self.inner)
+            SchemaNode::String => <&'de str>::deserialize(self.inner)
                 .map(Unexpected::Str)
                 .unwrap_or(Unexpected::Other("string")),
-            Schema::Bytes => <&'de [u8]>::deserialize(self.inner)
+            SchemaNode::Bytes => <&'de [u8]>::deserialize(self.inner)
                 .map(Unexpected::Bytes)
                 .unwrap_or(Unexpected::Other("bytes")),
 
-            Schema::OptionNone | Schema::OptionSome(_) => Unexpected::Option,
+            SchemaNode::OptionNone | SchemaNode::OptionSome(_) => Unexpected::Option,
 
-            Schema::Unit => Unexpected::Unit,
-            Schema::UnitStruct(_) => Unexpected::Other("unit struct"),
-            Schema::UnitVariant(_, _) => Unexpected::UnitVariant,
+            SchemaNode::Unit => Unexpected::Unit,
+            SchemaNode::UnitStruct(_) => Unexpected::Other("unit struct"),
+            SchemaNode::UnitVariant(_, _) => Unexpected::UnitVariant,
 
-            Schema::NewtypeStruct(_, _) => Unexpected::NewtypeStruct,
-            Schema::NewtypeVariant(_, _, _) => Unexpected::NewtypeVariant,
+            SchemaNode::NewtypeStruct(_, _) => Unexpected::NewtypeStruct,
+            SchemaNode::NewtypeVariant(_, _, _) => Unexpected::NewtypeVariant,
 
-            Schema::Sequence(_) => Unexpected::Seq,
-            Schema::Map(_, _) => Unexpected::Map,
+            SchemaNode::Sequence(_) => Unexpected::Seq,
+            SchemaNode::Map(_, _) => Unexpected::Map,
 
-            Schema::Tuple(_, _) => Unexpected::Other("tuple"),
-            Schema::TupleStruct(_, _, _) => Unexpected::Other("tuple struct"),
-            Schema::TupleVariant(_, _, _, _) => Unexpected::TupleVariant,
+            SchemaNode::Tuple(_, _) => Unexpected::Other("tuple"),
+            SchemaNode::TupleStruct(_, _, _) => Unexpected::Other("tuple struct"),
+            SchemaNode::TupleVariant(_, _, _, _) => Unexpected::TupleVariant,
 
-            Schema::Struct(_, _, _, _) => Unexpected::Other("struct"),
-            Schema::StructVariant(_, _, _, _, _) => Unexpected::StructVariant,
+            SchemaNode::Struct(_, _, _, _) => Unexpected::Other("struct"),
+            SchemaNode::StructVariant(_, _, _, _, _) => Unexpected::StructVariant,
 
-            Schema::Union(_) => Unexpected::Other("enum, skippable field or untagged union"),
+            SchemaNode::Union(_) => Unexpected::Other("enum, skippable field or untagged union"),
         })
     }
 
@@ -466,8 +506,8 @@ where
 }
 
 macro_rules! deserialize_simple {
-    ($fn_name:ident, $schema:pat) => {
-        deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_if(|schema| matches!(schema, $schema), deferred::$fn_name { visitor }))}
+    ($fn_name:ident, $node:pat) => {
+        deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_if(|node| matches!(node, $node), deferred::$fn_name { visitor }))}
     };
 
     ($fn_name:ident, @integer) => {
@@ -498,58 +538,58 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Bool => self.inner.deserialize_bool(visitor),
+        match self.node {
+            SchemaNode::Bool => self.inner.deserialize_bool(visitor),
 
-            Schema::I8 => self.inner.deserialize_i8(visitor),
-            Schema::I16 => self.inner.deserialize_i16(visitor),
-            Schema::I32 => self.inner.deserialize_i32(visitor),
-            Schema::I64 => self.inner.deserialize_i64(visitor),
-            Schema::I128 => self.inner.deserialize_i128(visitor),
+            SchemaNode::I8 => self.inner.deserialize_i8(visitor),
+            SchemaNode::I16 => self.inner.deserialize_i16(visitor),
+            SchemaNode::I32 => self.inner.deserialize_i32(visitor),
+            SchemaNode::I64 => self.inner.deserialize_i64(visitor),
+            SchemaNode::I128 => self.inner.deserialize_i128(visitor),
 
-            Schema::U8 => self.inner.deserialize_u8(visitor),
-            Schema::U16 => self.inner.deserialize_u16(visitor),
-            Schema::U32 => self.inner.deserialize_u32(visitor),
-            Schema::U64 => self.inner.deserialize_u64(visitor),
-            Schema::U128 => self.inner.deserialize_u128(visitor),
+            SchemaNode::U8 => self.inner.deserialize_u8(visitor),
+            SchemaNode::U16 => self.inner.deserialize_u16(visitor),
+            SchemaNode::U32 => self.inner.deserialize_u32(visitor),
+            SchemaNode::U64 => self.inner.deserialize_u64(visitor),
+            SchemaNode::U128 => self.inner.deserialize_u128(visitor),
 
-            Schema::F32 => self.inner.deserialize_f32(visitor),
-            Schema::F64 => self.inner.deserialize_f64(visitor),
-            Schema::Char => self.inner.deserialize_char(visitor),
+            SchemaNode::F32 => self.inner.deserialize_f32(visitor),
+            SchemaNode::F64 => self.inner.deserialize_f64(visitor),
+            SchemaNode::Char => self.inner.deserialize_char(visitor),
 
-            Schema::String => self.inner.deserialize_str(visitor),
-            Schema::Bytes => self.inner.deserialize_bytes(visitor),
+            SchemaNode::String => self.inner.deserialize_str(visitor),
+            SchemaNode::Bytes => self.inner.deserialize_bytes(visitor),
 
-            Schema::OptionNone => self
+            SchemaNode::OptionNone => self
                 .inner
                 .deserialize_unit(serde::de::IgnoredAny)
                 .and_then(|_| visitor.visit_none()),
-            Schema::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
-            Schema::Unit | Schema::UnitStruct(_) | Schema::UnitVariant(_, _) => {
+            SchemaNode::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
+            SchemaNode::Unit | SchemaNode::UnitStruct(_) | SchemaNode::UnitVariant(_, _) => {
                 self.deserialize_unit(visitor)
             }
 
-            Schema::NewtypeStruct(_, inner) | Schema::NewtypeVariant(_, _, inner) => {
+            SchemaNode::NewtypeStruct(_, inner) | SchemaNode::NewtypeVariant(_, _, inner) => {
                 visitor.visit_newtype_struct(self.forward(inner)?)
             }
-            Schema::Sequence(item) => self.do_deserialize_seq(item, visitor),
-            Schema::Map(key, value) => self.do_deserialize_map(key, value, visitor),
-            Schema::Tuple(_, field_schemas)
-            | Schema::TupleStruct(_, _, field_schemas)
-            | Schema::TupleVariant(_, _, _, field_schemas) => {
-                self.do_deserialize_tuple(field_schemas, visitor)
+            SchemaNode::Sequence(item) => self.do_deserialize_seq(item, visitor),
+            SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
+            SchemaNode::Tuple(_, field_types)
+            | SchemaNode::TupleStruct(_, _, field_types)
+            | SchemaNode::TupleVariant(_, _, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
             }
-            Schema::Struct(_, field_names, skip_list, field_schemas)
-            | Schema::StructVariant(_, _, field_names, skip_list, field_schemas) => {
-                self.do_deserialize_struct(field_names, skip_list, field_schemas, visitor)
+            SchemaNode::Struct(_, field_names, skip_list, field_types)
+            | SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
+                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
             }
-            Schema::Union(variants) => {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_any { visitor })
             }
         }
     }
 
-    deserialize_simple! { deserialize_bool, Schema::Bool }
+    deserialize_simple! { deserialize_bool, SchemaNode::Bool }
     deserialize_simple! { deserialize_i8, @integer }
     deserialize_simple! { deserialize_i16, @integer }
     deserialize_simple! { deserialize_i32, @integer }
@@ -562,28 +602,28 @@ where
     deserialize_simple! { deserialize_u128, @integer }
     deserialize_simple! { deserialize_f32, @float }
     deserialize_simple! { deserialize_f64, @float }
-    deserialize_simple! { deserialize_char, Schema::Char }
+    deserialize_simple! { deserialize_char, SchemaNode::Char }
 
     // TODO: schema evolution string <-> bytes
-    deserialize_simple! { deserialize_str, Schema::String }
-    deserialize_simple! { deserialize_string, Schema::String }
-    deserialize_simple! { deserialize_bytes, Schema::Bytes }
-    deserialize_simple! { deserialize_byte_buf, Schema::Bytes }
-    deserialize_simple! { deserialize_unit, Schema::Unit | Schema::UnitStruct(_) | Schema::UnitVariant(_, _) }
+    deserialize_simple! { deserialize_str, SchemaNode::String }
+    deserialize_simple! { deserialize_string, SchemaNode::String }
+    deserialize_simple! { deserialize_bytes, SchemaNode::Bytes }
+    deserialize_simple! { deserialize_byte_buf, SchemaNode::Bytes }
+    deserialize_simple! { deserialize_unit, SchemaNode::Unit | SchemaNode::UnitStruct(_) | SchemaNode::UnitVariant(_, _) }
 
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => {
+        match self.node {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_option { visitor })
             }
-            Schema::OptionNone => self
+            SchemaNode::OptionNone => self
                 .inner
                 .deserialize_unit(IgnoredAny)
                 .and_then(|_| visitor.visit_none()),
-            Schema::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
+            SchemaNode::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
             _ => visitor.visit_some(self),
         }
     }
@@ -607,15 +647,15 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => self.deserialize_union(
+        match self.node {
+            SchemaNode::Union(variants) => self.deserialize_union(
                 variants,
                 deferred::deserialize_newtype_struct { name, visitor },
             ),
-            Schema::OptionSome(inner) => self
+            SchemaNode::OptionSome(inner) => self
                 .forward(inner)?
                 .deserialize_newtype_struct(name, visitor),
-            Schema::NewtypeStruct(_, inner) | Schema::NewtypeVariant(_, _, inner) => {
+            SchemaNode::NewtypeStruct(_, inner) | SchemaNode::NewtypeVariant(_, _, inner) => {
                 visitor.visit_newtype_struct(self.forward(inner)?)
             }
             _ => visitor.visit_newtype_struct(self),
@@ -626,20 +666,20 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => {
+        match self.node {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_seq { visitor })
             }
 
-            Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner)
-            | Schema::OptionSome(inner) => self.forward(inner)?.deserialize_seq(visitor),
+            SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner)
+            | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_seq(visitor),
 
-            Schema::Sequence(item) => self.do_deserialize_seq(item, visitor),
-            Schema::Tuple(_, field_schemas)
-            | Schema::TupleStruct(_, _, field_schemas)
-            | Schema::TupleVariant(_, _, _, field_schemas) => {
-                self.do_deserialize_tuple(field_schemas, visitor)
+            SchemaNode::Sequence(item) => self.do_deserialize_seq(item, visitor),
+            SchemaNode::Tuple(_, field_types)
+            | SchemaNode::TupleStruct(_, _, field_types)
+            | SchemaNode::TupleVariant(_, _, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
             }
             _ => self.invalid_type_error(&visitor),
         }
@@ -649,19 +689,19 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => {
+        match self.node {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_tuple { len, visitor })
             }
 
-            Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner)
-            | Schema::OptionSome(inner) => self.forward(inner)?.deserialize_tuple(len, visitor),
+            SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner)
+            | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_tuple(len, visitor),
 
-            Schema::Tuple(_, field_schemas)
-            | Schema::TupleStruct(_, _, field_schemas)
-            | Schema::TupleVariant(_, _, _, field_schemas) => {
-                self.do_deserialize_tuple(field_schemas, visitor)
+            SchemaNode::Tuple(_, field_types)
+            | SchemaNode::TupleStruct(_, _, field_types)
+            | SchemaNode::TupleVariant(_, _, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
             }
 
             _ => self.invalid_type_error(&visitor),
@@ -684,19 +724,19 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => {
+        match self.node {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_map { visitor })
             }
 
-            Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner)
-            | Schema::OptionSome(inner) => self.forward(inner)?.deserialize_map(visitor),
+            SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner)
+            | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_map(visitor),
 
-            Schema::Map(key, value) => self.do_deserialize_map(key, value, visitor),
-            Schema::Struct(_, field_names, skip_list, field_schemas)
-            | Schema::StructVariant(_, _, field_names, skip_list, field_schemas) => {
-                self.do_deserialize_struct(field_names, skip_list, field_schemas, visitor)
+            SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
+            SchemaNode::Struct(_, field_names, skip_list, field_types)
+            | SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
+                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
             }
 
             _ => self.invalid_type_error(&visitor),
@@ -712,8 +752,8 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => self.deserialize_union(
+        match self.node {
+            SchemaNode::Union(variants) => self.deserialize_union(
                 variants,
                 deferred::deserialize_struct {
                     name,
@@ -722,17 +762,17 @@ where
                 },
             ),
 
-            Schema::NewtypeStruct(_, inner)
-            | Schema::NewtypeVariant(_, _, inner)
-            | Schema::OptionSome(inner) => self
+            SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner)
+            | SchemaNode::OptionSome(inner) => self
                 .forward(inner)?
                 .deserialize_struct(name, fields, visitor),
 
-            Schema::Struct(_, field_names, skip_list, field_schemas)
-            | Schema::StructVariant(_, _, field_names, skip_list, field_schemas) => {
-                self.do_deserialize_struct(field_names, skip_list, field_schemas, visitor)
+            SchemaNode::Struct(_, field_names, skip_list, field_types)
+            | SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
+                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
             }
-            Schema::Map(key, value) => self.do_deserialize_map(key, value, visitor),
+            SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
 
             _ => self.invalid_type_error(&visitor),
         }
@@ -747,9 +787,9 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(schemas) => self.deserialize_union(
-                schemas,
+        match self.node {
+            SchemaNode::Union(types) => self.deserialize_union(
+                types,
                 deferred::deserialize_enum {
                     name,
                     variants,
@@ -757,7 +797,7 @@ where
                 },
             ),
 
-            Schema::NewtypeStruct(_, inner) | Schema::OptionSome(inner) => self
+            SchemaNode::NewtypeStruct(_, inner) | SchemaNode::OptionSome(inner) => self
                 .forward(inner)?
                 .deserialize_enum(name, variants, visitor),
 
@@ -769,15 +809,15 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        match self.schema {
-            Schema::Union(variants) => {
+        match self.node {
+            SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_identifier { visitor })
             }
-            Schema::OptionSome(inner) => self.forward(inner)?.deserialize_identifier(visitor),
-            Schema::UnitVariant(_, variant)
-            | Schema::TupleVariant(_, variant, _, _)
-            | Schema::StructVariant(_, variant, _, _, _) => {
-                visitor.visit_str(self.root.name(variant).map_err(Self::Error::custom)?)
+            SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_identifier(visitor),
+            SchemaNode::UnitVariant(_, variant)
+            | SchemaNode::TupleVariant(_, variant, _, _)
+            | SchemaNode::StructVariant(_, variant, _, _, _) => {
+                visitor.visit_str(self.schema.name(variant).map_err(Self::Error::custom)?)
             }
             _ => self.invalid_type_error(&visitor),
         }
@@ -808,13 +848,13 @@ where
     where
         V: DeserializeSeed<'de>,
     {
-        match self.schema {
-            Schema::UnitVariant(_, variant)
-            | Schema::NewtypeVariant(_, variant, _)
-            | Schema::StructVariant(_, variant, _, _, _) => seed
+        match self.node {
+            SchemaNode::UnitVariant(_, variant)
+            | SchemaNode::NewtypeVariant(_, variant, _)
+            | SchemaNode::StructVariant(_, variant, _, _, _) => seed
                 .deserialize(NameDeserializer {
                     name: self
-                        .root
+                        .schema
                         .name(variant)
                         .map_err(DeserializerT::Error::custom)?,
                     phantom: PhantomData,
@@ -862,8 +902,8 @@ where
 }
 
 pub struct SchemaSeqDeserializer<'schema, InnerT> {
-    root: &'schema RootSchema,
-    item: Schema,
+    schema: &'schema Schema,
+    item: SchemaNode,
     inner: InnerT,
 }
 
@@ -882,7 +922,7 @@ where
         A: SeqAccess<'de>,
     {
         self.inner.visit_seq(SchemaSeqDeserializer {
-            root: self.root,
+            schema: self.schema,
             item: self.item,
             inner: seq,
         })
@@ -900,17 +940,17 @@ where
         T: DeserializeSeed<'de>,
     {
         self.inner.next_element_seed(SchemaDeserializer {
-            root: self.root,
-            schema: self.item,
+            schema: self.schema,
+            node: self.item,
             inner: seed,
         })
     }
 }
 
 pub struct SchemaMapDeserializer<'schema, InnerT> {
-    root: &'schema RootSchema,
-    key: Schema,
-    value: Schema,
+    schema: &'schema Schema,
+    key: SchemaNode,
+    value: SchemaNode,
     inner: InnerT,
 }
 
@@ -929,7 +969,7 @@ where
         A: MapAccess<'de>,
     {
         self.inner.visit_map(SchemaMapDeserializer {
-            root: self.root,
+            schema: self.schema,
             key: self.key,
             value: self.value,
             inner: map,
@@ -949,8 +989,8 @@ where
         K: DeserializeSeed<'de>,
     {
         self.inner.next_key_seed(SchemaDeserializer {
-            root: self.root,
-            schema: self.key,
+            schema: self.schema,
+            node: self.key,
             inner: seed,
         })
     }
@@ -961,8 +1001,8 @@ where
         V: DeserializeSeed<'de>,
     {
         self.inner.next_value_seed(SchemaDeserializer {
-            root: self.root,
-            schema: self.value,
+            schema: self.schema,
+            node: self.value,
             inner: seed,
         })
     }
@@ -979,13 +1019,13 @@ where
     {
         self.inner.next_entry_seed(
             SchemaDeserializer {
-                root: self.root,
-                schema: self.key,
+                schema: self.schema,
+                node: self.key,
                 inner: kseed,
             },
             SchemaDeserializer {
-                root: self.root,
-                schema: self.value,
+                schema: self.schema,
+                node: self.value,
                 inner: vseed,
             },
         )
@@ -993,8 +1033,8 @@ where
 }
 
 pub struct SchemaTupleDeserializer<'schema, InnerT> {
-    root: &'schema RootSchema,
-    items: &'schema [SchemaIndex],
+    schema: &'schema Schema,
+    items: &'schema [SchemaNodeIndex],
     inner: InnerT,
 }
 
@@ -1013,7 +1053,7 @@ where
         A: SeqAccess<'de>,
     {
         self.inner.visit_seq(SchemaTupleDeserializer {
-            root: self.root,
+            schema: self.schema,
             items: self.items,
             inner: seq,
         })
@@ -1030,10 +1070,10 @@ where
     where
         T: DeserializeSeed<'de>,
     {
-        if let Some(&schema) = self.items.split_off_first() {
+        if let Some(&node) = self.items.split_off_first() {
             self.inner.next_element_seed(SchemaDeserializer {
-                root: self.root,
-                schema: self.root.schema(schema).map_err(Self::Error::custom)?,
+                schema: self.schema,
+                node: self.schema.node(node).map_err(Self::Error::custom)?,
                 inner: seed,
             })
         } else {
@@ -1043,39 +1083,39 @@ where
 }
 
 pub struct SchemaStructDeserializer<'schema, InnerT> {
-    root: &'schema RootSchema,
+    schema: &'schema Schema,
     field_names: &'schema [NameIndex],
-    field_schemas: &'schema [SchemaIndex],
+    field_types: &'schema [SchemaNodeIndex],
     skip_list: &'schema [FieldIndex],
     variant: u64,
     i_field: usize,
-    next_value_schema: Option<Schema>,
+    next_value_schema: Option<SchemaNode>,
     inner: InnerT,
 }
 
 impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
     pub fn new<ErrorT>(
-        root: &'schema RootSchema,
+        schema: &'schema Schema,
         field_names: NameListIndex,
         skip_list: FieldListIndex,
-        field_schemas: SchemaListIndex,
+        field_types: SchemaNodeListIndex,
         inner: InnerT,
     ) -> Result<Self, ErrorT>
     where
         ErrorT: serde::de::Error,
     {
-        let field_names = root.name_list(field_names).map_err(ErrorT::custom)?;
-        let field_schemas = root.schema_list(field_schemas).map_err(ErrorT::custom)?;
-        if field_names.len() != field_schemas.len() {
+        let field_names = schema.name_list(field_names).map_err(ErrorT::custom)?;
+        let field_types = schema.node_list(field_types).map_err(ErrorT::custom)?;
+        if field_names.len() != field_types.len() {
             return Err(ErrorT::custom(
-                "bad schema: struct field name length and schema length mismatch",
+                "bad schema: struct field name length and type length mismatch",
             ));
         }
         Ok(Self {
-            root,
+            schema,
             field_names,
-            field_schemas,
-            skip_list: dbg!(root.field_list(skip_list).map_err(ErrorT::custom)?),
+            field_types,
+            skip_list: dbg!(schema.field_list(skip_list).map_err(ErrorT::custom)?),
             variant: 0,
             i_field: 0,
             next_value_schema: None,
@@ -1083,18 +1123,18 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
         })
     }
 
-    fn next<ErrorT>(&mut self) -> Result<Option<(&'schema str, Schema)>, ErrorT>
+    fn next<ErrorT>(&mut self) -> Result<Option<(&'schema str, SchemaNode)>, ErrorT>
     where
         ErrorT: serde::de::Error,
     {
         loop {
-            let (name_index, schema_index) = match (
+            let (name_index, node_index) = match (
                 self.field_names.split_off_first(),
-                self.field_schemas.split_off_first(),
+                self.field_types.split_off_first(),
             ) {
-                (Some(&name_index), Some(&schema_index)) => (name_index, schema_index),
+                (Some(&name_index), Some(&node_index)) => (name_index, node_index),
                 (None, None) => return Ok(None),
-                _ => unreachable!("schema & names are verified to have the same length"),
+                _ => unreachable!("types & names are verified to have the same length"),
             };
 
             // Skip fields marked as such in the variant.
@@ -1112,11 +1152,11 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             }
 
             // Skip Union([]) fields.
-            let schema = self.root.schema(schema_index).map_err(ErrorT::custom)?;
-            if let Schema::Union(schema_list) = schema
+            let field_type = self.schema.node(node_index).map_err(ErrorT::custom)?;
+            if let SchemaNode::Union(variants) = field_type
                 && self
-                    .root
-                    .schema_list(schema_list)
+                    .schema
+                    .node_list(variants)
                     .map_err(ErrorT::custom)?
                     .is_empty()
             {
@@ -1124,8 +1164,8 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             }
 
             return Ok(Some(dbg!(
-                self.root.name(name_index).map_err(ErrorT::custom)?,
-                schema,
+                self.schema.name(name_index).map_err(ErrorT::custom)?,
+                field_type,
             )));
         }
     }
@@ -1193,9 +1233,9 @@ where
         A: SeqAccess<'de>,
     {
         self.inner.visit_map(SchemaStructDeserializer {
-            root: self.root,
+            schema: self.schema,
             field_names: self.field_names,
-            field_schemas: self.field_schemas,
+            field_types: self.field_types,
             skip_list: self.skip_list,
             variant: self.variant,
             i_field: self.i_field,
@@ -1216,12 +1256,12 @@ where
     where
         K: DeserializeSeed<'de>,
     {
-        let Some((name, schema)) = self.next()? else {
+        let Some((field_name, field_type)) = self.next()? else {
             return Ok(None);
         };
-        self.next_value_schema = Some(schema);
+        self.next_value_schema = Some(field_type);
         seed.deserialize(NameDeserializer {
-            name,
+            name: field_name,
             phantom: PhantomData,
         })
         .map(Some)
@@ -1234,8 +1274,8 @@ where
     {
         self.inner
             .next_element_seed(SchemaDeserializer {
-                root: self.root,
-                schema: self
+                schema: self.schema,
+                node: self
                     .next_value_schema
                     .expect("called next_value_seed with no next_key_seed"),
                 inner: seed,
@@ -1253,20 +1293,20 @@ where
         K: DeserializeSeed<'de>,
         V: DeserializeSeed<'de>,
     {
-        let Some((name, schema)) = self.next()? else {
+        let Some((field_name, field_type)) = self.next()? else {
             return Ok(None);
         };
 
         let key = kseed.deserialize(NameDeserializer {
-            name,
+            name: field_name,
             phantom: PhantomData,
         })?;
 
         let value = self
             .inner
             .next_element_seed(SchemaDeserializer {
-                root: self.root,
-                schema,
+                schema: self.schema,
+                node: field_type,
                 inner: vseed,
             })?
             .ok_or_else(|| Self::Error::custom("more struct keys than values"))?;
