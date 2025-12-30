@@ -85,6 +85,10 @@ pub struct Value(pub(crate) Vec<u8>);
 /// assert_eq!(roundtripped_value2, original2);
 /// assert_eq!(roundtripped_value3, original3);
 ///
+/// # std::fs::remove_file("file1.type1")?;
+/// # std::fs::remove_file("file2.type1")?;
+/// # std::fs::remove_file("file3.type2")?;
+/// # std::fs::remove_file("schema")?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Default, Clone)]

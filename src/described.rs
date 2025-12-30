@@ -41,14 +41,15 @@ use crate::Schema;
 /// // Any non-self-describing format will work, but let's use `bitcode` which is
 /// // particularly fussy about what it supports and what it doesn't.
 /// let serialized = bitcode::serialize(&SelfDescribed(&original))?;
-/// let SelfDescribed(roundtripped) = bitcode::deserialize::<SelfDescribed<TopLevelV1>>(&serialized)?;
+/// let SelfDescribed(roundtripped) =
+///     bitcode::deserialize::<SelfDescribed<TopLevelV1>>(&serialized)?;
 /// assert_eq!(roundtripped, original);
 ///
 /// // An evolution of the previous type.
 /// #[derive(Debug, PartialEq, Serialize, Deserialize)]
 /// struct TopLevelV2 {
-///     // We increased the integer size to 64 bits, but still want to deserialize from the old
-///     // name (and type).
+///     // We increased the integer size to 64 bits, but still want to deserialize
+///     // from the old name (and type).
 ///     #[serde(alias="int32")]
 ///     int64: u64,
 ///
@@ -60,8 +61,8 @@ use crate::Schema;
 ///     children: Vec<UntaggedV2>,
 /// }
 ///
-/// // We removed the `Bool` option that was unused, and added a `Vec` option instead, shifting the
-/// // order around in the process.
+/// // We removed the `Bool` option that was unused, and added a `Vec` option instead,
+/// // shifting the variant order around in the process.
 /// #[derive(Debug, PartialEq, Serialize, Deserialize)]
 /// #[serde(untagged)]
 /// enum UntaggedV2 {
@@ -71,7 +72,8 @@ use crate::Schema;
 ///     Vec(Vec<u64>),
 /// }
 ///
-/// let SelfDescribed(roundtripped) = bitcode::deserialize::<SelfDescribed<TopLevelV2>>(&serialized)?;
+/// let SelfDescribed(roundtripped) =
+///     bitcode::deserialize::<SelfDescribed<TopLevelV2>>(&serialized)?;
 /// assert_eq!(
 ///     roundtripped,
 ///     TopLevelV2 {
