@@ -146,7 +146,6 @@ impl SchemaBuilder {
             node_lists: self.node_lists.into_iter().collect::<Vec<_>>().into(),
             field_lists: self.field_lists.into_iter().collect::<Vec<_>>().into(),
         };
-        eprintln!("SCHEMA:\n{}\n\n", schema.dump());
         Ok(schema)
     }
 }
@@ -162,7 +161,7 @@ pub(crate) struct RootSerializer<'a> {
 
 impl RootSerializer<'_> {
     #[inline]
-    fn reborrow<'b>(&'b mut self) -> RootSerializer<'b> where {
+    fn reborrow<'b>(&'b mut self) -> RootSerializer<'b> {
         RootSerializer {
             data: self.data,
             names: self.names,
