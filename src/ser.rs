@@ -201,9 +201,9 @@ impl<'a> ValueCursor<'a> {
         assert_eq!(name_list.len(), node_list.len());
 
         if skip_list.is_empty() {
-            let mut serializer = serializer.serialize_tuple(node_list.len())?;
-            for &node in node_list {
-                serializer.serialize_element(&self.pop_child(node))?
+            let mut serializer = serializer.serialize_tuple(length)?;
+            for field in iter_field_indices(presence) {
+                serializer.serialize_element(&self.pop_child(node_list[usize::from(field)]))?;
             }
             serializer.end()
         } else {
