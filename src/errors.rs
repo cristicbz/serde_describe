@@ -9,13 +9,13 @@ pub enum SerError {
     TooManySchemaNodeLists,
 
     #[error("too many fields for u32")]
-    TooManyFields,
+    TooManyMembers,
 
     #[error("too many names for u32")]
     TooManyNames,
 
     #[error("too many field lists for u32")]
-    TooManyNameLists,
+    TooManyFieldNameLists,
 
     #[error("too many values for u32")]
     TooManyValues,

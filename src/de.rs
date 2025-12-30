@@ -1,21 +1,22 @@
 use serde::{
-    Deserialize,
     de::{
         DeserializeSeed, Deserializer, EnumAccess, Error as _, Expected, IgnoredAny, MapAccess,
         SeqAccess, Unexpected, VariantAccess,
     },
+    Deserialize,
 };
 use std::marker::PhantomData;
 
 use crate::{
-    Schema,
-    anonymous_union::{UNION_ENUM_NAME, deserialized_anonymous_variants},
+    anonymous_union::{deserialized_anonymous_variants, UNION_ENUM_NAME},
     deferred::{self, CallResult, CallValue, CanonicalVisit, DeferredDeserialize},
     described::{DescribedBy, SelfDescribed},
     indices::{
-        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
+        FieldNameIndex, FieldNameListIndex, IsEmpty, MemberIndex, MemberListIndex, SchemaNodeIndex,
+        SchemaNodeListIndex,
     },
     schema::SchemaNode,
+    Schema,
 };
 
 impl<'de, T> Deserialize<'de> for SelfDescribed<T>
@@ -215,8 +216,8 @@ where
     #[inline]
     fn do_deserialize_struct<VisitorT>(
         self,
-        field_names: NameListIndex,
-        skip_list: FieldListIndex,
+        field_names: FieldNameListIndex,
+        skip_list: MemberListIndex,
         field_types: SchemaNodeListIndex,
         visitor: VisitorT,
     ) -> Result<VisitorT::Value, DeserializerT::Error>
@@ -770,9 +771,11 @@ where
             SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_identifier(visitor),
             SchemaNode::UnitVariant(_, variant)
             | SchemaNode::TupleVariant(_, variant, _, _)
-            | SchemaNode::StructVariant(_, variant, _, _, _) => {
-                visitor.visit_str(self.schema.name(variant).map_err(Self::Error::custom)?)
-            }
+            | SchemaNode::StructVariant(_, variant, _, _, _) => visitor.visit_str(
+                self.schema
+                    .variant_name(variant)
+                    .map_err(Self::Error::custom)?,
+            ),
             _ => self.invalid_type_error(&visitor),
         }
     }
@@ -809,7 +812,7 @@ where
                 .deserialize(NameDeserializer {
                     name: self
                         .schema
-                        .name(variant)
+                        .variant_name(variant)
                         .map_err(DeserializerT::Error::custom)?,
                     phantom: PhantomData,
                 })
@@ -1038,9 +1041,9 @@ where
 
 pub struct SchemaStructDeserializer<'schema, InnerT> {
     schema: &'schema Schema,
-    field_names: &'schema [NameIndex],
+    field_names: &'schema [FieldNameIndex],
     field_types: &'schema [SchemaNodeIndex],
-    skip_list: &'schema [FieldIndex],
+    skip_list: &'schema [MemberIndex],
     variant: u64,
     i_field: usize,
     next_value_schema: Option<SchemaNode>,
@@ -1050,15 +1053,17 @@ pub struct SchemaStructDeserializer<'schema, InnerT> {
 impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
     pub fn new<ErrorT>(
         schema: &'schema Schema,
-        field_names: NameListIndex,
-        skip_list: FieldListIndex,
+        field_names: FieldNameListIndex,
+        skip_list: MemberListIndex,
         field_types: SchemaNodeListIndex,
         inner: InnerT,
     ) -> Result<Self, ErrorT>
     where
         ErrorT: serde::de::Error,
     {
-        let field_names = schema.name_list(field_names).map_err(ErrorT::custom)?;
+        let field_names = schema
+            .field_name_list(field_names)
+            .map_err(ErrorT::custom)?;
         let field_types = schema.node_list(field_types).map_err(ErrorT::custom)?;
         if field_names.len() != field_types.len() {
             return Err(ErrorT::custom(
@@ -1069,7 +1074,7 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             schema,
             field_names,
             field_types,
-            skip_list: schema.field_list(skip_list).map_err(ErrorT::custom)?,
+            skip_list: schema.member_list(skip_list).map_err(ErrorT::custom)?,
             variant: 0,
             i_field: 0,
             next_value_schema: None,
@@ -1106,20 +1111,13 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             }
 
             // Skip Union([]) fields.
-            let field_type = self.schema.node(node_index).map_err(ErrorT::custom)?;
-            if let SchemaNode::Union(variants) = field_type
-                && self
-                    .schema
-                    .node_list(variants)
-                    .map_err(ErrorT::custom)?
-                    .is_empty()
-            {
+            if node_index.is_empty() {
                 continue;
             }
 
             return Ok(Some((
-                self.schema.name(name_index).map_err(ErrorT::custom)?,
-                field_type,
+                self.schema.field_name(name_index).map_err(ErrorT::custom)?,
+                self.schema.node(node_index).map_err(ErrorT::custom)?,
             )));
         }
     }
@@ -1137,7 +1135,15 @@ where
     {
         let num_variant_bits = (self.skip_list.len() - self.i_field).min(8);
         if num_variant_bits == 0 {
-            deserializer.deserialize_tuple(self.field_names.len(), self)
+            deserializer.deserialize_tuple(
+                self.field_names.len()
+                    - self
+                        .field_types
+                        .iter()
+                        .filter(|field_type| field_type.is_empty())
+                        .count(),
+                self,
+            )
         } else {
             deserializer.deserialize_enum(
                 UNION_ENUM_NAME,
@@ -1177,7 +1183,12 @@ where
             let length = self.field_names.len()
                 + usize::try_from(self.variant.count_ones())
                     .expect("usize needs to be at least 32 bits")
-                - self.skip_list.len();
+                - self.skip_list.len()
+                - self
+                    .field_types
+                    .iter()
+                    .filter(|field_type| field_type.is_empty())
+                    .count();
             data.tuple_variant(length, self)
         }
     }

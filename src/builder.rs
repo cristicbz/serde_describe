@@ -1,10 +1,10 @@
 use crate::{
     errors::SerError,
     indices::{
-        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
-        TraceIndex, TypeName,
+        FieldNameIndex, FieldNameListIndex, MemberIndex, MemberListIndex, SchemaNodeIndex,
+        SchemaNodeListIndex, TraceIndex, TypeName, TypeNameIndex, VariantNameIndex,
     },
-    pool::Pool,
+    pool::{NonEmptyPool, Pool},
     schema::{Schema, SchemaNode},
     trace::Trace,
 };
@@ -93,12 +93,14 @@ pub struct Value(pub(crate) Vec<u8>);
 /// ```
 #[derive(Default, Clone)]
 pub struct SchemaBuilder {
-    names: Pool<&'static str, NameIndex>,
-    name_lists: Pool<Box<[NameIndex]>, NameListIndex>,
+    root: SchemaBuilderNode,
     nodes: Pool<SchemaNode, SchemaNodeIndex>,
     node_lists: Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
-    field_lists: Pool<Box<[FieldIndex]>, FieldListIndex>,
-    root: SchemaBuilderNode,
+    member_lists: Pool<Box<[MemberIndex]>, MemberListIndex>,
+    field_name_lists: NonEmptyPool<Box<[FieldNameIndex]>, FieldNameListIndex>,
+    field_names: NonEmptyPool<&'static str, FieldNameIndex>,
+    variant_names: NonEmptyPool<&'static str, VariantNameIndex>,
+    type_names: NonEmptyPool<&'static str, TypeNameIndex>,
 }
 
 impl SchemaBuilder {
@@ -118,11 +120,13 @@ impl SchemaBuilder {
         let mut data = Vec::new();
         let new_root = value.serialize(RootSerializer {
             data: &mut data,
-            names: &mut self.names,
-            name_lists: &mut self.name_lists,
-            schemas: &mut self.nodes,
-            schema_lists: &mut self.node_lists,
-            field_lists: &mut self.field_lists,
+            nodes: &mut self.nodes,
+            node_lists: &mut self.node_lists,
+            member_lists: &mut self.member_lists,
+            field_name_lists: &mut self.field_name_lists,
+            field_names: &mut self.field_names,
+            variant_names: &mut self.variant_names,
+            type_names: &mut self.type_names,
         })?;
         self.root.union(new_root);
         Ok(Value(data))
@@ -135,16 +139,13 @@ impl SchemaBuilder {
     pub fn build(mut self) -> Result<Schema, SerError> {
         let schema = Schema {
             root_index: std::mem::take(&mut self.root).build(&mut self)?,
-            nodes: self.nodes.into_iter().collect::<Vec<_>>().into(),
-            names: self
-                .names
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>()
-                .into(),
-            name_lists: self.name_lists.into_iter().collect::<Vec<_>>().into(),
-            node_lists: self.node_lists.into_iter().collect::<Vec<_>>().into(),
-            field_lists: self.field_lists.into_iter().collect::<Vec<_>>().into(),
+            nodes: self.nodes.into(),
+            node_lists: self.node_lists.into(),
+            member_lists: self.member_lists.into(),
+            field_name_lists: self.field_name_lists.into(),
+            field_names: self.field_names.into(),
+            variant_names: self.variant_names.into(),
+            type_names: self.type_names.into(),
         };
         Ok(schema)
     }
@@ -152,11 +153,13 @@ impl SchemaBuilder {
 
 pub(crate) struct RootSerializer<'a> {
     data: &'a mut Vec<u8>,
-    names: &'a mut Pool<&'static str, NameIndex>,
-    name_lists: &'a mut Pool<Box<[NameIndex]>, NameListIndex>,
-    schemas: &'a mut Pool<SchemaNode, SchemaNodeIndex>,
-    schema_lists: &'a mut Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
-    field_lists: &'a mut Pool<Box<[FieldIndex]>, FieldListIndex>,
+    nodes: &'a mut Pool<SchemaNode, SchemaNodeIndex>,
+    node_lists: &'a mut Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
+    member_lists: &'a mut Pool<Box<[MemberIndex]>, MemberListIndex>,
+    field_name_lists: &'a mut NonEmptyPool<Box<[FieldNameIndex]>, FieldNameListIndex>,
+    field_names: &'a mut NonEmptyPool<&'static str, FieldNameIndex>,
+    variant_names: &'a mut NonEmptyPool<&'static str, VariantNameIndex>,
+    type_names: &'a mut NonEmptyPool<&'static str, TypeNameIndex>,
 }
 
 impl RootSerializer<'_> {
@@ -164,17 +167,19 @@ impl RootSerializer<'_> {
     fn reborrow<'b>(&'b mut self) -> RootSerializer<'b> {
         RootSerializer {
             data: self.data,
-            names: self.names,
-            name_lists: self.name_lists,
-            schemas: self.schemas,
-            schema_lists: self.schema_lists,
-            field_lists: self.field_lists,
+            nodes: self.nodes,
+            field_name_lists: self.field_name_lists,
+            node_lists: self.node_lists,
+            member_lists: self.member_lists,
+            field_names: self.field_names,
+            variant_names: self.variant_names,
+            type_names: self.type_names,
         }
     }
 
     #[inline]
     fn push_struct_name(&mut self, name: &'static str) -> Result<TypeName, SerError> {
-        let name = self.names.intern(name)?;
+        let name = self.type_names.intern(name)?;
         self.push_u32(name.into());
         Ok(TypeName(name, None))
     }
@@ -185,28 +190,25 @@ impl RootSerializer<'_> {
         name: &'static str,
         variant: &'static str,
     ) -> Result<TypeName, SerError> {
-        let name = self.names.intern(name)?;
-        let variant = self.names.intern(variant)?;
+        let name = self.type_names.intern(name)?;
+        let variant = self.variant_names.intern(variant)?;
         self.push_u32(name.into());
         self.push_u32(variant.into());
         Ok(TypeName(name, Some(variant)))
     }
 
     #[inline]
-    fn intern_field_name(&mut self, name: &'static str) -> Result<NameIndex, SerError> {
-        self.names.intern(name)
+    fn intern_field_name(&mut self, name: &'static str) -> Result<FieldNameIndex, SerError> {
+        self.field_names.intern(name)
     }
 
     #[inline]
-    fn fill_reserved_field_name_list<NameListT>(
+    fn fill_reserved_field_name_list(
         &mut self,
         index: TraceIndex,
-        names: NameListT,
-    ) -> Result<NameListIndex, SerError>
-    where
-        Box<[NameIndex]>: From<NameListT>,
-    {
-        let names = self.name_lists.intern_from(names)?;
+        names: Vec<FieldNameIndex>,
+    ) -> Result<FieldNameListIndex, SerError> {
+        let names = self.field_name_lists.intern_from(names)?;
         self.fill_reserved_bytes(index, &u32::from(names).to_le_bytes());
         Ok(names)
     }
@@ -264,7 +266,7 @@ impl RootSerializer<'_> {
     fn write_field_presence(
         &mut self,
         index: TraceIndex,
-        field: FieldIndex,
+        field: MemberIndex,
     ) -> Result<TraceIndex, SerError> {
         self.fill_reserved_bytes(index, &u32::from(field).to_le_bytes());
         TraceIndex::try_from(usize::from(index) + std::mem::size_of::<u32>())
@@ -308,9 +310,9 @@ pub(crate) enum SchemaBuilderNode {
     /// Tuple, tuple struct, tuple variant, struct or struct variant.
     Record {
         name: Option<TypeName>,
-        field_names: Option<NameListIndex>,
+        field_names: Option<FieldNameListIndex>,
         field_types: Vec<SchemaBuilderNode>,
-        skippable: Vec<FieldIndex>,
+        skippable: Vec<MemberIndex>,
         length: u32,
     },
 }
@@ -529,11 +531,11 @@ impl SchemaBuilderNode {
                         unreachable!("anonymous structs don't exist in rust!")
                     }
                     (Some(TypeName(name, None)), Some(field_names)) => {
-                        let skip_list = builder.field_lists.intern_from(skippable)?;
+                        let skip_list = builder.member_lists.intern_from(skippable)?;
                         SchemaNode::Struct(name, field_names, skip_list, field_types)
                     }
                     (Some(TypeName(name, Some(variant))), Some(field_names)) => {
-                        let skip_list = builder.field_lists.intern_from(skippable)?;
+                        let skip_list = builder.member_lists.intern_from(skippable)?;
                         SchemaNode::StructVariant(
                             name,
                             variant,
@@ -947,9 +949,9 @@ pub(crate) struct StructSchemaBuilder<'a> {
     name: TypeName,
     reserved_field_name_list: TraceIndex,
     reserved_field_presence: TraceIndex,
-    field_names: Vec<NameIndex>,
+    field_names: Vec<FieldNameIndex>,
     field_types: Vec<SchemaBuilderNode>,
-    skipped: Vec<FieldIndex>,
+    skipped: Vec<MemberIndex>,
 }
 
 impl<'a> StructSchemaBuilder<'a> {
@@ -983,7 +985,7 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
     {
         self.reserved_field_presence = self.parent.write_field_presence(
             self.reserved_field_presence,
-            FieldIndex::try_from(self.field_names.len())?,
+            MemberIndex::try_from(self.field_names.len())?,
         )?;
         self.field_names.push(self.parent.intern_field_name(key)?);
         self.field_types

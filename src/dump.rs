@@ -4,8 +4,8 @@ use thiserror::Error;
 use crate::{
     indices::SchemaNodeIndex,
     schema::{
-        NoSuchFieldListError, NoSuchNameError, NoSuchNameListError, NoSuchSchemaError,
-        NoSuchSchemaListError, Schema, SchemaNode,
+        NoSuchFieldListError, NoSuchFieldNameError, NoSuchFieldNameListError, NoSuchNodeListError,
+        NoSuchSchemaError, NoSuchTypeNameError, NoSuchVariantNameError, Schema, SchemaNode,
     },
 };
 
@@ -53,15 +53,15 @@ impl Schema {
             }
 
             SchemaNode::UnitStruct(name) => {
-                writeln!(output, "{}{},", indent, self.name(name)?).expect("string output");
+                writeln!(output, "{}{},", indent, self.type_name(name)?).expect("string output");
             }
             SchemaNode::UnitVariant(name, variant) => {
                 writeln!(
                     output,
                     "{}{}::{},",
                     indent,
-                    self.name(name)?,
-                    self.name(variant)?
+                    self.type_name(name)?,
+                    self.variant_name(variant)?
                 )
                 .expect("string output");
             }
@@ -72,7 +72,7 @@ impl Schema {
                 writeln!(output, "{indent}),").expect("string output");
             }
             SchemaNode::NewtypeStruct(name, inner) => {
-                writeln!(output, "{}{}(", indent, self.name(name)?).expect("string output");
+                writeln!(output, "{}{}(", indent, self.type_name(name)?).expect("string output");
                 self.recursive_dump(indent, inner, output)?;
                 writeln!(output, "{indent}),").expect("string output");
             }
@@ -81,8 +81,8 @@ impl Schema {
                     output,
                     "{}{}::{}(",
                     indent,
-                    self.name(name)?,
-                    self.name(variant)?
+                    self.type_name(name)?,
+                    self.variant_name(variant)?
                 )
                 .expect("string output");
                 self.recursive_dump(indent, inner, output)?;
@@ -109,7 +109,7 @@ impl Schema {
             }
 
             SchemaNode::TupleStruct(name, _, schema_list) => {
-                writeln!(output, "{}{}(", indent, self.name(name)?).expect("string output");
+                writeln!(output, "{}{}(", indent, self.type_name(name)?).expect("string output");
                 for &node in self.node_list(schema_list)? {
                     self.recursive_dump(indent, node, output)?;
                 }
@@ -120,8 +120,8 @@ impl Schema {
                     output,
                     "{}{}::{}(",
                     indent,
-                    self.name(name)?,
-                    self.name(variant)?
+                    self.type_name(name)?,
+                    self.variant_name(variant)?
                 )
                 .expect("string output");
                 for &node in self.node_list(schema_list)? {
@@ -131,12 +131,12 @@ impl Schema {
             }
 
             SchemaNode::Struct(name, name_list, skip_list, type_list) => {
-                writeln!(output, "{}{} {{", indent, self.name(name)?).expect("string output");
+                writeln!(output, "{}{} {{", indent, self.type_name(name)?).expect("string output");
                 indent.push_str("  ");
-                let mut skips = self.field_list(skip_list)?;
+                let mut skips = self.member_list(skip_list)?;
                 let has_skips = !skips.is_empty();
                 for (i_field, (&name, &node)) in self
-                    .name_list(name_list)?
+                    .field_name_list(name_list)?
                     .iter()
                     .zip(self.node_list(type_list)?)
                     .enumerate()
@@ -150,10 +150,11 @@ impl Schema {
                         } else {
                             ""
                         };
-                        writeln!(output, "{}{}{}:", indent, self.name(name)?, required)
+                        writeln!(output, "{}{}{}:", indent, self.field_name(name)?, required)
                             .expect("string output");
                     } else {
-                        writeln!(output, "{}{}:", indent, self.name(name)?).expect("string output");
+                        writeln!(output, "{}{}:", indent, self.field_name(name)?)
+                            .expect("string output");
                     }
                     self.recursive_dump(indent, node, output)?;
                 }
@@ -165,15 +166,15 @@ impl Schema {
                     output,
                     "{}{}::{} {{",
                     indent,
-                    self.name(name)?,
-                    self.name(variant)?
+                    self.type_name(name)?,
+                    self.variant_name(variant)?
                 )
                 .expect("string output");
                 indent.push_str("  ");
-                let mut skips = self.field_list(skip_list)?;
+                let mut skips = self.member_list(skip_list)?;
                 let has_skips = !skips.is_empty();
                 for (i_field, (&name, &node)) in self
-                    .name_list(name_list)?
+                    .field_name_list(name_list)?
                     .iter()
                     .zip(self.node_list(type_list)?)
                     .enumerate()
@@ -187,10 +188,17 @@ impl Schema {
                         } else {
                             "required"
                         };
-                        writeln!(output, "{}{} [{}]:", indent, self.name(name)?, required)
-                            .expect("string output");
+                        writeln!(
+                            output,
+                            "{}{} [{}]:",
+                            indent,
+                            self.field_name(name)?,
+                            required
+                        )
+                        .expect("string output");
                     } else {
-                        writeln!(output, "{}{}:", indent, self.name(name)?).expect("string output");
+                        writeln!(output, "{}{}:", indent, self.field_name(name)?)
+                            .expect("string output");
                     }
                     self.recursive_dump(indent, node, output)?;
                 }
@@ -216,16 +224,22 @@ impl Schema {
 #[derive(Clone, Copy, Debug, Error)]
 pub(crate) enum DumpError {
     #[error("dump error: {0}")]
-    Name(#[from] NoSuchNameError),
+    FieldName(#[from] NoSuchFieldNameError),
 
     #[error("dump error: {0}")]
-    NameList(#[from] NoSuchNameListError),
+    TypeName(#[from] NoSuchTypeNameError),
+
+    #[error("dump error: {0}")]
+    VariantName(#[from] NoSuchVariantNameError),
+
+    #[error("dump error: {0}")]
+    NameList(#[from] NoSuchFieldNameListError),
 
     #[error("dump error: {0}")]
     Schema(#[from] NoSuchSchemaError),
 
     #[error("dump error: {0}")]
-    SchemaList(#[from] NoSuchSchemaListError),
+    SchemaList(#[from] NoSuchNodeListError),
 
     #[error("dump error: {0}")]
     FieldList(#[from] NoSuchFieldListError),

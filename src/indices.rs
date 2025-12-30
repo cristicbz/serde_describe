@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::hash::Hash;
+use std::{borrow::Borrow, hash::Hash};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct TypeName(pub(crate) NameIndex, pub(crate) Option<NameIndex>);
+pub(crate) struct TypeName(
+    pub(crate) TypeNameIndex,
+    pub(crate) Option<VariantNameIndex>,
+);
 
 macro_rules! u32_indices {
     ($($index_ty:ident => $error:ident,)+) => {
@@ -45,12 +48,110 @@ macro_rules! u32_indices {
         )+
     };
 }
+pub(crate) trait IsEmpty
+where
+    Self: 'static + Borrow<Self::Borrowed> + Sized,
+{
+    type Borrowed: ?Sized;
+    const BORROWED_EMPTY: &Self::Borrowed;
+
+    fn is_empty(&self) -> bool;
+}
+
+impl<ValueT> IsEmpty for Box<[ValueT]>
+where
+    ValueT: 'static,
+{
+    type Borrowed = [ValueT];
+    const BORROWED_EMPTY: &Self::Borrowed = &[];
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+}
+
+impl<ValueT> IsEmpty for Vec<ValueT>
+where
+    ValueT: 'static,
+{
+    type Borrowed = [ValueT];
+    const BORROWED_EMPTY: &Self::Borrowed = &[];
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+}
+
+impl IsEmpty for Box<str> {
+    type Borrowed = str;
+    const BORROWED_EMPTY: &<Self as IsEmpty>::Borrowed = "";
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+}
+
+impl IsEmpty for &'static str {
+    type Borrowed = str;
+    const BORROWED_EMPTY: &<Self as IsEmpty>::Borrowed = "";
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+}
+
+pub(crate) trait IndexIsEmpty:
+    Sized + Copy + PartialEq + 'static + IsEmpty<Borrowed = Self>
+{
+    const EMPTY: Self;
+}
+
+impl<IndexT> IndexIsEmpty for IndexT
+where
+    IndexT: Copy + PartialEq + 'static + IsEmpty<Borrowed = Self>,
+{
+    const EMPTY: Self = *Self::BORROWED_EMPTY;
+}
+
+macro_rules! impl_is_empty {
+    ($($index_ty:ident,)+) => {
+        $(
+            #[allow(unused)]
+            impl IsEmpty for $index_ty {
+                type Borrowed = Self;
+                const BORROWED_EMPTY: &<Self as IsEmpty>::Borrowed = &Self(0);
+
+                #[inline]
+                fn is_empty(&self) -> bool {
+                    *self == Self(0)
+                }
+            }
+        )+
+    };
+}
+
 u32_indices! {
     SchemaNodeIndex => TooManySchemaNodes,
     SchemaNodeListIndex => TooManySchemaNodeLists,
-    FieldListIndex => TooManyFields,
-    FieldIndex => TooManyFields,
-    NameIndex => TooManyNames,
-    NameListIndex => TooManyNameLists,
+    MemberListIndex => TooManyMembers,
+    MemberIndex => TooManyMembers,
+    TypeNameIndex => TooManyNames,
+    VariantNameIndex => TooManyNames,
+    FieldNameIndex => TooManyNames,
+    FieldNameListIndex => TooManyFieldNameLists,
     TraceIndex => TooManyValues,
+}
+
+impl_is_empty! {
+    SchemaNodeIndex,
+    SchemaNodeListIndex,
+    MemberListIndex,
+    FieldNameListIndex,
+    TypeNameIndex,
+    VariantNameIndex,
+    FieldNameIndex,
 }

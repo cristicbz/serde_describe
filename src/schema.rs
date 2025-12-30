@@ -5,8 +5,10 @@ use thiserror::Error;
 use crate::{
     builder::Value,
     indices::{
-        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
+        FieldNameIndex, FieldNameListIndex, IndexIsEmpty, IsEmpty, MemberIndex, MemberListIndex,
+        SchemaNodeIndex, SchemaNodeListIndex, TypeNameIndex, VariantNameIndex,
     },
+    pool::{ReadonlyNonEmptyPool, ReadonlyPool},
     DescribedBy,
 };
 
@@ -21,11 +23,13 @@ use crate::{
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Schema {
     pub(crate) root_index: SchemaNodeIndex,
-    pub(crate) nodes: Box<[SchemaNode]>,
-    pub(crate) names: Box<[Box<str>]>,
-    pub(crate) name_lists: Box<[Box<[NameIndex]>]>,
-    pub(crate) node_lists: Box<[Box<[SchemaNodeIndex]>]>,
-    pub(crate) field_lists: Box<[Box<[FieldIndex]>]>,
+    pub(crate) nodes: ReadonlyPool<SchemaNode, SchemaNodeIndex>,
+    pub(crate) node_lists: ReadonlyPool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
+    pub(crate) member_lists: ReadonlyPool<Box<[MemberIndex]>, MemberListIndex>,
+    pub(crate) field_name_lists: ReadonlyNonEmptyPool<Box<[FieldNameIndex]>, FieldNameListIndex>,
+    pub(crate) field_names: ReadonlyNonEmptyPool<Box<str>, FieldNameIndex>,
+    pub(crate) variant_names: ReadonlyNonEmptyPool<Box<str>, VariantNameIndex>,
+    pub(crate) type_names: ReadonlyNonEmptyPool<Box<str>, TypeNameIndex>,
 }
 
 impl Schema {
@@ -111,62 +115,85 @@ impl Schema {
     }
 
     #[inline]
-    pub(crate) fn name(&self, index: NameIndex) -> Result<&str, NoSuchNameError> {
-        self.names
-            .get(usize::from(index))
-            .map(|string| &**string)
-            .ok_or(NoSuchNameError(index))
-    }
-
-    #[inline]
-    pub(crate) fn name_list(
-        &self,
-        index: NameListIndex,
-    ) -> Result<&[NameIndex], NoSuchNameListError> {
-        self.name_lists
-            .get(usize::from(index))
-            .map(|list| &**list)
-            .ok_or(NoSuchNameListError(index))
-    }
-
-    #[inline]
     pub(crate) fn node(&self, index: SchemaNodeIndex) -> Result<SchemaNode, NoSuchSchemaError> {
         self.nodes
-            .get(usize::from(index))
+            .get(index)
             .copied()
             .ok_or(NoSuchSchemaError(index))
+    }
+
+    #[inline]
+    pub(crate) fn field_name_list(
+        &self,
+        index: FieldNameListIndex,
+    ) -> Result<&[FieldNameIndex], NoSuchFieldNameListError> {
+        self.field_name_lists
+            .get(index)
+            .map(|list| &**list)
+            .ok_or(NoSuchFieldNameListError(index))
     }
 
     #[inline]
     pub(crate) fn node_list(
         &self,
         index: SchemaNodeListIndex,
-    ) -> Result<&[SchemaNodeIndex], NoSuchSchemaListError> {
-        self.node_lists
-            .get(usize::from(index))
-            .map(|list| &**list)
-            .ok_or(NoSuchSchemaListError(index))
+    ) -> Result<&[SchemaNodeIndex], NoSuchNodeListError> {
+        self.node_lists.get(index).ok_or(NoSuchNodeListError(index))
     }
 
     #[inline]
-    pub(crate) fn field_list(
+    pub(crate) fn member_list(
         &self,
-        index: FieldListIndex,
-    ) -> Result<&[FieldIndex], NoSuchFieldListError> {
-        self.field_lists
-            .get(usize::from(index))
-            .map(|list| &**list)
+        index: MemberListIndex,
+    ) -> Result<&[MemberIndex], NoSuchFieldListError> {
+        self.member_lists
+            .get(index)
             .ok_or(NoSuchFieldListError(index))
+    }
+
+    #[inline]
+    pub(crate) fn field_name(&self, index: FieldNameIndex) -> Result<&str, NoSuchFieldNameError> {
+        self.field_names
+            .get(index)
+            .map(|list| &**list)
+            .ok_or(NoSuchFieldNameError(index))
+    }
+
+    #[inline]
+    pub(crate) fn variant_name(
+        &self,
+        index: VariantNameIndex,
+    ) -> Result<&str, NoSuchVariantNameError> {
+        self.variant_names
+            .get(index)
+            .map(|list| &**list)
+            .ok_or(NoSuchVariantNameError(index))
+    }
+
+    #[inline]
+    pub(crate) fn type_name(&self, index: TypeNameIndex) -> Result<&str, NoSuchTypeNameError> {
+        self.type_names
+            .get(index)
+            .map(|string| &**string)
+            .ok_or(NoSuchTypeNameError(index))
     }
 }
 
 #[derive(Clone, Copy, Debug, Error)]
-#[error("no such name with index {0:?}")]
-pub(crate) struct NoSuchNameError(NameIndex);
+#[error("no such field name with index {0:?}")]
+pub(crate) struct NoSuchFieldNameError(FieldNameIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
-#[error("no such name list with index {0:?}")]
-pub(crate) struct NoSuchNameListError(NameListIndex);
+#[error("no such type name with index {0:?}")]
+pub(crate) struct NoSuchTypeNameError(TypeNameIndex);
+
+#[derive(Clone, Copy, Debug, Error)]
+#[error("no such variant name with index {0:?}")]
+pub(crate) struct NoSuchVariantNameError(VariantNameIndex);
+
+#[derive(Clone, Copy, Debug, Error)]
+#[error("no such field name list with index {0:?}")]
+pub(crate) struct NoSuchFieldNameListError(FieldNameListIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
 #[error("no such node with index {0:?}")]
@@ -174,11 +201,11 @@ pub(crate) struct NoSuchSchemaError(SchemaNodeIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
 #[error("no such node list with index {0:?}")]
-pub(crate) struct NoSuchSchemaListError(SchemaNodeListIndex);
+pub(crate) struct NoSuchNodeListError(SchemaNodeListIndex);
 
 #[derive(Clone, Copy, Debug, Error)]
 #[error("no such field list with index {0:?}")]
-pub(crate) struct NoSuchFieldListError(FieldListIndex);
+pub(crate) struct NoSuchFieldListError(MemberListIndex);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum SchemaNode {
@@ -206,32 +233,41 @@ pub(crate) enum SchemaNode {
     OptionSome(SchemaNodeIndex),
 
     Unit,
-    UnitStruct(NameIndex),
-    UnitVariant(NameIndex, NameIndex),
+    UnitStruct(TypeNameIndex),
+    UnitVariant(TypeNameIndex, VariantNameIndex),
 
-    NewtypeStruct(NameIndex, SchemaNodeIndex),
-    NewtypeVariant(NameIndex, NameIndex, SchemaNodeIndex),
+    NewtypeStruct(TypeNameIndex, SchemaNodeIndex),
+    NewtypeVariant(TypeNameIndex, VariantNameIndex, SchemaNodeIndex),
 
     Sequence(SchemaNodeIndex),
     Map(SchemaNodeIndex, SchemaNodeIndex),
 
     Tuple(u32, SchemaNodeListIndex),
-    TupleStruct(NameIndex, u32, SchemaNodeListIndex),
-    TupleVariant(NameIndex, NameIndex, u32, SchemaNodeListIndex),
+    TupleStruct(TypeNameIndex, u32, SchemaNodeListIndex),
+    TupleVariant(TypeNameIndex, VariantNameIndex, u32, SchemaNodeListIndex),
 
     Struct(
-        NameIndex,
-        NameListIndex,
-        FieldListIndex,
+        TypeNameIndex,
+        FieldNameListIndex,
+        MemberListIndex,
         SchemaNodeListIndex,
     ),
     StructVariant(
-        NameIndex,
-        NameIndex,
-        NameListIndex,
-        FieldListIndex,
+        TypeNameIndex,
+        VariantNameIndex,
+        FieldNameListIndex,
+        MemberListIndex,
         SchemaNodeListIndex,
     ),
 
     Union(SchemaNodeListIndex),
+}
+
+impl IsEmpty for SchemaNode {
+    type Borrowed = Self;
+    const BORROWED_EMPTY: &Self::Borrowed = &SchemaNode::Union(SchemaNodeListIndex::EMPTY);
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::BORROWED_EMPTY)
+    }
 }

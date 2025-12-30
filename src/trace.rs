@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::{cell::Cell, hash::Hash};
 
-use crate::indices::{NameIndex, NameListIndex};
+use crate::indices::{FieldNameListIndex, TypeNameIndex, VariantNameIndex};
 
 #[derive(Copy, Debug, Clone)]
 pub(crate) enum TraceNode {
@@ -29,21 +29,21 @@ pub(crate) enum TraceNode {
     Some,
 
     Unit,
-    UnitStruct(NameIndex),
-    UnitVariant(NameIndex, NameIndex),
+    UnitStruct(TypeNameIndex),
+    UnitVariant(TypeNameIndex, VariantNameIndex),
 
-    NewtypeStruct(NameIndex),
-    NewtypeVariant(NameIndex, NameIndex),
+    NewtypeStruct(TypeNameIndex),
+    NewtypeVariant(TypeNameIndex, VariantNameIndex),
 
     Sequence,
     Map,
 
     Tuple(u32),
-    TupleStruct(u32, NameIndex),
-    TupleVariant(u32, NameIndex, NameIndex),
+    TupleStruct(u32, TypeNameIndex),
+    TupleVariant(u32, TypeNameIndex, VariantNameIndex),
 
-    Struct(NameIndex, NameListIndex),
-    StructVariant(NameIndex, NameIndex, NameListIndex),
+    Struct(TypeNameIndex, FieldNameListIndex),
+    StructVariant(TypeNameIndex, VariantNameIndex, FieldNameListIndex),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
@@ -207,33 +207,45 @@ pub(crate) trait ReadTraceExt<'data> {
 
             Trace::Unit => TraceNode::Unit,
 
-            Trace::UnitStruct => TraceNode::UnitStruct(self.pop_name()),
-            Trace::UnitVariant => TraceNode::UnitVariant(self.pop_name(), self.pop_name()),
+            Trace::UnitStruct => TraceNode::UnitStruct(self.pop_type_name()),
+            Trace::UnitVariant => {
+                TraceNode::UnitVariant(self.pop_type_name(), self.pop_variant_name())
+            }
 
-            Trace::NewtypeStruct => TraceNode::NewtypeStruct(self.pop_name()),
-            Trace::NewtypeVariant => TraceNode::NewtypeVariant(self.pop_name(), self.pop_name()),
+            Trace::NewtypeStruct => TraceNode::NewtypeStruct(self.pop_type_name()),
+            Trace::NewtypeVariant => {
+                TraceNode::NewtypeVariant(self.pop_type_name(), self.pop_variant_name())
+            }
 
             Trace::Map => TraceNode::Map,
             Trace::Sequence => TraceNode::Sequence,
 
             Trace::Tuple => TraceNode::Tuple(self.pop_u32()),
-            Trace::TupleStruct => TraceNode::TupleStruct(self.pop_u32(), self.pop_name()),
-            Trace::TupleVariant => {
-                TraceNode::TupleVariant(self.pop_u32(), self.pop_name(), self.pop_name())
-            }
+            Trace::TupleStruct => TraceNode::TupleStruct(self.pop_u32(), self.pop_type_name()),
+            Trace::TupleVariant => TraceNode::TupleVariant(
+                self.pop_u32(),
+                self.pop_type_name(),
+                self.pop_variant_name(),
+            ),
 
-            Trace::Struct => TraceNode::Struct(self.pop_name(), self.pop_name_list()),
-            Trace::StructVariant => {
-                TraceNode::StructVariant(self.pop_name(), self.pop_name(), self.pop_name_list())
-            }
+            Trace::Struct => TraceNode::Struct(self.pop_type_name(), self.pop_field_name_list()),
+            Trace::StructVariant => TraceNode::StructVariant(
+                self.pop_type_name(),
+                self.pop_variant_name(),
+                self.pop_field_name_list(),
+            ),
         }
     }
 
-    fn pop_name(&self) -> NameIndex {
+    fn pop_variant_name(&self) -> VariantNameIndex {
         self.pop_u32().into()
     }
 
-    fn pop_name_list(&self) -> NameListIndex {
+    fn pop_type_name(&self) -> TypeNameIndex {
+        self.pop_u32().into()
+    }
+
+    fn pop_field_name_list(&self) -> FieldNameListIndex {
         self.pop_u32().into()
     }
 

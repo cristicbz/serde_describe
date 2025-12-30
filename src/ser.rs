@@ -3,7 +3,8 @@ use crate::{
     builder::SchemaBuilder,
     described::SelfDescribed,
     indices::{
-        FieldIndex, FieldListIndex, NameIndex, NameListIndex, SchemaNodeIndex, SchemaNodeListIndex,
+        FieldNameIndex, FieldNameListIndex, MemberIndex, MemberListIndex, SchemaNodeIndex,
+        SchemaNodeListIndex,
     },
     schema::SchemaNode,
     trace::{ReadTraceExt, TraceNode},
@@ -186,25 +187,25 @@ impl<'a> ValueCursor<'a> {
     fn serialize_struct<S>(
         &self,
         serializer: S,
-        name_list: NameListIndex,
-        skip_list: FieldListIndex,
+        name_list: FieldNameListIndex,
+        skip_list: MemberListIndex,
         node_list: SchemaNodeListIndex,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let skip_list = self.schema.field_list(skip_list).unwrap();
+        let skip_list = self.schema.member_list(skip_list).unwrap();
         let node_list = self.schema.node_list(node_list).unwrap();
-        let name_list = self.schema.name_list(name_list).unwrap();
+        let name_list = self.schema.field_name_list(name_list).unwrap();
         let length = self.tail.pop_length_u32();
         let presence = self.tail.pop_slice(length * std::mem::size_of::<u32>());
         assert_eq!(name_list.len(), node_list.len());
 
         if skip_list.is_empty() {
-            let mut serializer = serializer.serialize_tuple(node_list.len())?;
-            for &node in node_list {
-                serializer.serialize_element(&self.pop_child(node))?
-            }
+            let mut serializer = serializer.serialize_tuple(length)?;
+            iter_field_indices(presence).try_for_each(|field| {
+                serializer.serialize_element(&self.pop_child(node_list[usize::from(field)]))
+            })?;
             serializer.end()
         } else {
             SkippableStructSerializer {
@@ -380,8 +381,8 @@ struct SkippableStructSerializer<'a, 'v> {
     cursor: &'v ValueCursor<'a>,
     presence: &'a [u8],
     variant: u64,
-    name_list: &'a [NameIndex],
-    skip_list: &'a [FieldIndex],
+    name_list: &'a [FieldNameIndex],
+    skip_list: &'a [MemberIndex],
     node_list: &'a [SchemaNodeIndex],
 }
 impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
@@ -421,7 +422,7 @@ impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
     }
 }
 
-fn variant_from_presence(skip_list: &[FieldIndex], presence: &[u8]) -> u64 {
+fn variant_from_presence(skip_list: &[MemberIndex], presence: &[u8]) -> u64 {
     let mut variant = 0u64;
     let mut presence = iter_field_indices(presence).rev().peekable();
     for &skip in skip_list.iter().rev() {
@@ -441,11 +442,11 @@ fn variant_from_presence(skip_list: &[FieldIndex], presence: &[u8]) -> u64 {
     variant
 }
 
-fn iter_field_indices(presence: &[u8]) -> impl DoubleEndedIterator<Item = FieldIndex> {
+fn iter_field_indices(presence: &[u8]) -> impl DoubleEndedIterator<Item = MemberIndex> {
     presence
-        .chunks_exact(std::mem::size_of::<FieldIndex>())
+        .chunks_exact(std::mem::size_of::<MemberIndex>())
         .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
-        .map(FieldIndex::from)
+        .map(MemberIndex::from)
 }
 
 impl Serialize for ValueCursor<'_> {
