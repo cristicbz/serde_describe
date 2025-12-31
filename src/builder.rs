@@ -85,20 +85,20 @@ pub struct Value(pub(crate) Vec<u8>);
 /// assert_eq!(roundtripped_value2, original2);
 /// assert_eq!(roundtripped_value3, original3);
 ///
-/// # std::fs::remove_file("file1.type1")?;
-/// # std::fs::remove_file("file2.type1")?;
-/// # std::fs::remove_file("file3.type2")?;
-/// # std::fs::remove_file("schema")?;
+/// // # std::fs::remove_file("file1.type1")?;
+/// // # std::fs::remove_file("file2.type1")?;
+/// // # std::fs::remove_file("file3.type2")?;
+/// // # std::fs::remove_file("schema")?;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Default, Clone)]
 pub struct SchemaBuilder {
-    names: Pool<&'static str, NameIndex>,
-    name_lists: Pool<Box<[NameIndex]>, NameListIndex>,
-    nodes: Pool<SchemaNode, SchemaNodeIndex>,
-    node_lists: Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
-    field_lists: Pool<Box<[FieldIndex]>, FieldListIndex>,
-    root: SchemaBuilderNode,
+    pub(crate) names: Pool<&'static str, NameIndex>,
+    pub(crate) name_lists: Pool<Box<[NameIndex]>, NameListIndex>,
+    pub(crate) nodes: Pool<SchemaNode, SchemaNodeIndex>,
+    pub(crate) node_lists: Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
+    pub(crate) field_lists: Pool<Box<[FieldIndex]>, FieldListIndex>,
+    pub(crate) root: SchemaBuilderNode,
 }
 
 impl SchemaBuilder {
@@ -121,7 +121,7 @@ impl SchemaBuilder {
             names: &mut self.names,
             name_lists: &mut self.name_lists,
             schemas: &mut self.nodes,
-            schema_lists: &mut self.node_lists,
+            node_lists: &mut self.node_lists,
             field_lists: &mut self.field_lists,
         })?;
         self.root.union(new_root);
@@ -133,20 +133,14 @@ impl SchemaBuilder {
     ///
     /// See the top-level [`SchemaBuilder`] documentation for an example.
     pub fn build(mut self) -> Result<Schema, SerError> {
-        let schema = Schema {
-            root_index: std::mem::take(&mut self.root).build(&mut self)?,
-            nodes: self.nodes.into_iter().collect::<Vec<_>>().into(),
-            names: self
-                .names
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>()
-                .into(),
-            name_lists: self.name_lists.into_iter().collect::<Vec<_>>().into(),
-            node_lists: self.node_lists.into_iter().collect::<Vec<_>>().into(),
-            field_lists: self.field_lists.into_iter().collect::<Vec<_>>().into(),
-        };
-        Ok(schema)
+        Schema::new(
+            std::mem::take(&mut self.root).build(&mut self)?,
+            self.nodes,
+            &self.node_lists,
+            &self.name_lists,
+            &self.field_lists,
+            &self.names,
+        )
     }
 }
 
@@ -155,7 +149,7 @@ pub(crate) struct RootSerializer<'a> {
     names: &'a mut Pool<&'static str, NameIndex>,
     name_lists: &'a mut Pool<Box<[NameIndex]>, NameListIndex>,
     schemas: &'a mut Pool<SchemaNode, SchemaNodeIndex>,
-    schema_lists: &'a mut Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
+    node_lists: &'a mut Pool<Box<[SchemaNodeIndex]>, SchemaNodeListIndex>,
     field_lists: &'a mut Pool<Box<[FieldIndex]>, FieldListIndex>,
 }
 
@@ -167,7 +161,7 @@ impl RootSerializer<'_> {
             names: self.names,
             name_lists: self.name_lists,
             schemas: self.schemas,
-            schema_lists: self.schema_lists,
+            node_lists: self.node_lists,
             field_lists: self.field_lists,
         }
     }

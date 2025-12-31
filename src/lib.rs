@@ -72,7 +72,6 @@ mod tests {
             },
         ];
         assert_eq!(original, bitcode_roundtrip(&original));
-        panic!("AHH");
         assert_eq!(original, postcard_roundtrip(&original));
     }
 }

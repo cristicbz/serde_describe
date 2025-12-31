@@ -19,6 +19,16 @@ impl<ValueT, ValueIndexT> IntoIterator for Pool<ValueT, ValueIndexT> {
     }
 }
 
+impl<'a, ValueT, ValueIndexT> IntoIterator for &'a Pool<ValueT, ValueIndexT> {
+    type IntoIter = <&'a IndexSet<ValueT> as IntoIterator>::IntoIter;
+    type Item = &'a ValueT;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        (&self.inner).into_iter()
+    }
+}
+
 impl<ValueT, ValueIndexT> Default for Pool<ValueT, ValueIndexT> {
     #[inline]
     fn default() -> Self {
@@ -51,6 +61,17 @@ where
     // pub(crate) fn new() -> Self {
     //     Self::default()
     // }
+    pub(crate) fn iter<'a>(&'a self) -> <&'a Self as IntoIterator>::IntoIter {
+        self.into_iter()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 
     pub(crate) fn intern(&mut self, value: ValueT) -> Result<ValueIndexT, SerError> {
         ValueIndexT::try_from(self.inner.insert_full(value).0)

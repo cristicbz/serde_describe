@@ -1137,7 +1137,7 @@ where
     {
         let num_variant_bits = (self.skip_list.len() - self.i_field).min(8);
         if num_variant_bits == 0 {
-            deserializer.deserialize_tuple(dbg!(self.field_names.len()), self)
+            deserializer.deserialize_tuple(self.field_names.len(), self)
         } else {
             deserializer.deserialize_enum(
                 UNION_ENUM_NAME,
@@ -1174,6 +1174,7 @@ where
             data.newtype_variant_seed(self)
         } else {
             self.i_field = 0;
+
             let length = self.field_names.len()
                 + usize::try_from(self.variant.count_ones())
                     .expect("usize needs to be at least 32 bits")
@@ -1210,7 +1211,7 @@ where
     where
         K: DeserializeSeed<'de>,
     {
-        let Some((field_name, field_type)) = dbg!(self.next()?) else {
+        let Some((field_name, field_type)) = self.next()? else {
             return Ok(None);
         };
         self.next_value_schema = Some(field_type);
