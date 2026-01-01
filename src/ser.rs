@@ -203,6 +203,11 @@ impl<'a> TraceCursor<'a> {
 
         if skip_list.is_empty() {
             let mut serializer = serializer.serialize_tuple(length)?;
+            // Even if there are no fields in the `skip_list`, some fields are skipped because
+            // they're of type `Union[]`.
+            //
+            // These are fields that are ALWAYS skipped, so they don't need bits in the variant,
+            // but they also don't need to be emitted.
             iter_field_indices(presence).try_for_each(|field| {
                 serializer.serialize_element(&self.pop_child(node_list[usize::from(field)]))
             })?;
@@ -385,6 +390,7 @@ struct SkippableStructSerializer<'a, 'v> {
     skip_list: &'a [MemberIndex],
     node_list: &'a [SchemaNodeIndex],
 }
+
 impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -449,6 +455,15 @@ fn iter_field_indices(presence: &[u8]) -> impl DoubleEndedIterator<Item = Member
         .map(MemberIndex::from)
 }
 
+// Any issues caused by a mismatch between the schema and the trace are considered bugs and
+// therefore panic. Traces are not serializable as such, so they don't come from an untrusted
+// source.
+//
+// The `object -> trace` part of serialization handles errors gracefully, since the object may be
+// untrusted (and of course deserialization does as well).
+//
+// It's unclear to me whether it would be better to actually report these kinds of internal
+// inconsistencies via `SerError` as well or not.
 impl Serialize for TraceCursor<'_> {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

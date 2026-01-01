@@ -1,4 +1,13 @@
-//! TODO: module level docs
+//! TODO: crate level docs
+//!
+//! Known limitations:
+//! * At most 64 "skippable" fields. This can be lifted by using a `BitVec` instead of as single
+//!   u64 to keep track of them. This is a backwards compatible change that can be made in the
+//!   future.
+//! * Similarly, there is a limit of 256 union variants. This can be lifted by splitting the
+//!   discriminator into multiple bytes (variant 0x03fe becomes `_03(_fe(data))`). This trick is
+//!   already done to support more than 8 skippable fields and can be extended backwards
+//!   compatibly.
 #![deny(missing_docs)]
 
 pub(crate) mod anonymous_union;

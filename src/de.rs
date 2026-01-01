@@ -1137,6 +1137,9 @@ where
         if num_variant_bits == 0 {
             deserializer.deserialize_tuple(
                 self.field_names.len()
+                    // Fields that are ALWAYS skipped are not present in `skip_list`, instead
+                    // they're typed as `Union[]`, the bottom type. We need to subtract these from
+                    // the number of field names to work out how many fields we'll actually emit.
                     - self
                         .field_types
                         .iter()
@@ -1181,9 +1184,14 @@ where
         } else {
             self.i_field = 0;
             let length = self.field_names.len()
+                // Discount fields that are present in the `skip_list` and don't have a bit set in
+                // the presence variant.
                 + usize::try_from(self.variant.count_ones())
                     .expect("usize needs to be at least 32 bits")
                 - self.skip_list.len()
+                // Fields that are ALWAYS skipped are not present in `skip_list`, instead
+                // they're typed as `Union[]`, the bottom type. We need to subtract these
+                // as well.
                 - self
                     .field_types
                     .iter()

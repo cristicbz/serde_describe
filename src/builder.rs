@@ -500,6 +500,17 @@ impl SchemaBuilderNode {
                 length,
                 mut skippable,
             } => {
+                // Filter out fields whose type is an empty union (bottom-typed) from the skippable
+                // list. These are fields that are ALWAYS skipped, and therefore not considered
+                // skippABLE.
+                //
+                // Struct fields are split into three categories:
+                // 1. Fields that are never skipped (type != Union[], not in skip list). Do not
+                //    require discriminant bits.
+                // 2. Fields that are always skipped (type == Union[], not in skip list). Do not
+                //    require discriminant bits.
+                // 3. Fields that are sometimes skipped (type != Union[], present in skip list).
+                //    Require discriminant bits.
                 skippable.retain(|&index| {
                     !matches!(
                         &field_types[usize::from(index)],
@@ -953,6 +964,11 @@ impl<'a> StructSchemaBuilder<'a> {
         mut parent: RootSerializer<'a>,
     ) -> Result<Self, SerError> {
         let reserved_field_name_list = parent.reserve_u32()?;
+        // Note that, maybe counter-intuitively, this `length` does NOT include skipped fields.
+        // This explicitly documented by `serde`.
+        //
+        // So we're reserving precisely as much data as we're going to serialize. This is important
+        // for the whole "skippable" field logic to work.
         parent.push_u32_length(length)?;
         Ok(Self {
             name,
