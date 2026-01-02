@@ -558,7 +558,7 @@ impl SchemaBuilderNode {
                 variants.sort_unstable();
                 variants.dedup();
                 if variants.len() > MAX_UNION_VARIANTS {
-                    return Err(TraceError::from(TraceLimitErrorKind::UnionVariants))?;
+                    return Err(TraceError::from(TraceLimitErrorKind::UnionVariants));
                 }
                 SchemaNode::Union(builder.node_lists.intern_from(variants)?)
             }
@@ -911,7 +911,7 @@ pub(crate) struct MapSchemaBuilder<'a> {
     reserved_length: TraceIndex,
     key_schema: SchemaBuilderNode,
     value_schema: SchemaBuilderNode,
-    length: u32,
+    length: usize,
 }
 
 impl SerializeMap for MapSchemaBuilder<'_> {
@@ -941,8 +941,12 @@ impl SerializeMap for MapSchemaBuilder<'_> {
 
     #[inline]
     fn end(mut self) -> Result<Self::Ok, Self::Error> {
-        self.parent
-            .fill_reserved_bytes(self.reserved_length, &self.length.to_le_bytes());
+        self.parent.fill_reserved_bytes(
+            self.reserved_length,
+            &u32::try_from(self.length)
+                .map_err(|_| TraceLimitErrorKind::Values)?
+                .to_le_bytes(),
+        );
         Ok(SchemaBuilderNode::Map(
             Box::new(self.key_schema),
             Box::new(self.value_schema),
