@@ -1,36 +1,213 @@
-pub(crate) fn serialized_anonymous_variant<ErrorT>(i_variant: u32) -> Result<&'static str, ErrorT>
-where
-    ErrorT: serde::ser::Error,
-{
-    UNION_ENUM_VARIANT_NAMES
-        .get(usize::try_from(i_variant).expect("usize should be at least 32 bits"))
-        .copied()
-        .ok_or_else(|| {
-            ErrorT::custom(format!(
-                "too many union variants {i_variant} >= {MAX_UNION_ENUM_VARIANTS}"
-            ))
-        })
+use serde::{
+    Serialize,
+    de::{DeserializeSeed, Deserializer, EnumAccess, Unexpected, VariantAccess},
+};
+
+pub(crate) struct ChunkedEnum<InnerT> {
+    num_bytes: usize,
+    variants: &'static [&'static str],
+    discriminant: [u8; 8],
+    inner: InnerT,
 }
 
-pub(crate) fn deserialized_anonymous_variants<ErrorT>(
-    num_variants: usize,
-) -> Result<&'static [&'static str], ErrorT>
+impl<'value, ValueT> ChunkedEnum<&'value ValueT>
 where
-    ErrorT: serde::de::Error,
+    ValueT: Serialize,
 {
-    UNION_ENUM_VARIANT_NAMES
-        .split_at_checked(num_variants)
-        .map(|(variants, _)| variants)
-        .ok_or_else(|| {
-            ErrorT::custom(format!(
-                "too many union variants {num_variants} > {MAX_UNION_ENUM_VARIANTS}"
-            ))
-        })
+    #[inline]
+    pub(crate) fn serializable<ErrorT>(
+        num_bits: usize,
+        discriminant: u64,
+        value: &'value ValueT,
+    ) -> Result<Self, ErrorT>
+    where
+        ErrorT: serde::ser::Error,
+    {
+        if num_bits <= 64 {
+            Ok(Self {
+                num_bytes: num_bits.div_ceil(8),
+                variants: &[], // unused for serialization
+                discriminant: discriminant.to_le_bytes(),
+                inner: value,
+            })
+        } else {
+            Err(ErrorT::custom("too many bits in chunked enum"))
+        }
+    }
 }
 
-pub(crate) const MAX_UNION_ENUM_VARIANTS: usize = UNION_ENUM_VARIANT_NAMES.len();
-pub(crate) const UNION_ENUM_NAME: &str = "Union";
-pub(crate) const UNION_ENUM_VARIANT_NAMES: &[&str; 256] = &{
+impl<ValueT> Serialize for ChunkedEnum<&'_ ValueT>
+where
+    ValueT: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.num_bytes == 0 {
+            return self.inner.serialize(serializer);
+        }
+
+        let i_byte = self.num_bytes - 1;
+        let new_byte = self.discriminant[i_byte];
+        if i_byte == 0 {
+            serializer.serialize_newtype_variant(
+                UNION_ENUM_NAME,
+                u32::from(new_byte),
+                serialized_anonymous_variant(new_byte),
+                self.inner,
+            )
+        } else {
+            serializer.serialize_newtype_variant(
+                UNION_ENUM_NAME,
+                u32::from(new_byte),
+                serialized_anonymous_variant(new_byte),
+                &ChunkedEnum {
+                    num_bytes: i_byte,
+                    ..*self
+                },
+            )
+        }
+    }
+}
+
+impl<'de, SeederT, SeedT> ChunkedEnum<SeederT>
+where
+    SeederT: FnOnce(u64) -> SeedT,
+    SeedT: DeserializeSeed<'de>,
+{
+    #[inline]
+    pub(crate) fn deserializable<ErrorT>(num_bits: usize, seeder: SeederT) -> Result<Self, ErrorT>
+    where
+        ErrorT: serde::de::Error,
+    {
+        if num_bits <= 64 {
+            let (num_bytes, variants) = match (num_bits / 8, num_bits % 8) {
+                (0, 0) => (0, &[][..]),
+                (quotient, 0) => (quotient, &UNION_ENUM_VARIANT_NAMES[..]),
+                (quotient, remainder) => {
+                    (quotient + 1, &UNION_ENUM_VARIANT_NAMES[..(1 << remainder)])
+                }
+            };
+
+            Ok(Self {
+                num_bytes,
+                variants,
+                discriminant: [0u8; 8],
+                inner: seeder,
+            })
+        } else {
+            Err(ErrorT::custom("too many bits in chunked enum"))
+        }
+    }
+}
+
+impl<'de, SeederT, SeedT> DeserializeSeed<'de> for ChunkedEnum<SeederT>
+where
+    SeederT: FnOnce(u64) -> SeedT,
+    SeedT: DeserializeSeed<'de>,
+{
+    type Value = SeedT::Value;
+
+    #[inline]
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if self.num_bytes > 0 {
+            deserializer.deserialize_enum(UNION_ENUM_NAME, self.variants, self)
+        } else {
+            (self.inner)(u64::from_le_bytes(self.discriminant)).deserialize(deserializer)
+        }
+    }
+}
+
+impl<'de, SeederT, SeedT> serde::de::Visitor<'de> for ChunkedEnum<SeederT>
+where
+    SeederT: FnOnce(u64) -> SeedT,
+    SeedT: DeserializeSeed<'de>,
+{
+    type Value = SeedT::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "chunked discriminant")
+    }
+
+    fn visit_enum<A>(mut self, data: A) -> Result<Self::Value, A::Error>
+    where
+        A: EnumAccess<'de>,
+    {
+        let i_byte = self.num_bytes - 1;
+        let (new_byte, data) = data.variant_seed(AnonymousVariantSeed)?;
+        self.discriminant[i_byte] = new_byte;
+
+        if i_byte > 0 {
+            self.num_bytes = i_byte;
+            self.variants = UNION_ENUM_VARIANT_NAMES;
+            data.newtype_variant_seed(self)
+        } else {
+            data.newtype_variant_seed((self.inner)(u64::from_le_bytes(self.discriminant)))
+        }
+    }
+}
+
+#[inline]
+fn serialized_anonymous_variant(discriminant: u8) -> &'static str {
+    UNION_ENUM_VARIANT_NAMES[usize::from(discriminant)]
+}
+
+struct AnonymousVariantSeed;
+
+impl<'de> DeserializeSeed<'de> for AnonymousVariantSeed {
+    type Value = u8;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<u8, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_identifier(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for AnonymousVariantSeed {
+    type Value = u8;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "union discriminant")
+    }
+
+    #[inline]
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        u8::try_from(value).map_err(|_| E::invalid_value(Unexpected::Unsigned(value), &self))
+    }
+
+    #[inline]
+    fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(value)
+    }
+
+    #[inline]
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        (if let Some(hex) = value.strip_prefix('_') {
+            u8::from_str_radix(hex, 16).ok()
+        } else {
+            None
+        })
+        .ok_or_else(|| E::custom(format!("bad union variant name {value}")))
+    }
+}
+
+const UNION_ENUM_NAME: &str = "Union";
+const UNION_ENUM_VARIANT_NAMES: &[&str; 256] = &{
     const HEX: [u8; 16] = *b"0123456789abcdef";
 
     // Creates the variant names `_00`, `_01`, ..., `_ff` as byte arrays.

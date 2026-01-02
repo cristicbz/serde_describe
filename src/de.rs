@@ -9,8 +9,8 @@ use std::marker::PhantomData;
 
 use crate::{
     Schema,
-    anonymous_union::{UNION_ENUM_NAME, deserialized_anonymous_variants},
-    deferred::{self, CallResult, CallValue, CanonicalVisit, DeferredDeserialize},
+    anonymous_union::ChunkedEnum,
+    deferred::{self, CallResult, CanonicalVisit, DeferredDeserialize},
     described::{DescribedBy, SelfDescribed},
     indices::{
         FieldNameIndex, FieldNameListIndex, IsEmpty, MemberIndex, MemberListIndex, SchemaNodeIndex,
@@ -224,7 +224,7 @@ where
     where
         VisitorT: serde::de::Visitor<'de>,
     {
-        SchemaStructDeserializer::new(self.schema, field_names, skip_list, field_types, visitor)?
+        SchemaStructDeserializer::seed(self.schema, field_names, skip_list, field_types, visitor)?
             .deserialize(self.inner)
     }
 
@@ -336,38 +336,12 @@ where
     where
         CallT: DeferredDeserialize<'de>,
     {
-        struct UnionVisitor<'schema, CallT>(&'schema Schema, &'schema [SchemaNodeIndex], CallT);
-
-        impl<'de, 'schema, CallT> serde::de::Visitor<'de> for UnionVisitor<'schema, CallT>
-        where
-            CallT: DeferredDeserialize<'de>,
-        {
-            type Value = CallValue<'de, CallT>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "a union discriminant")
-            }
-
-            #[inline]
-            fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::EnumAccess<'de>,
-            {
-                let (variant, data) = data.variant_seed(AnonymousVariantSeed)?;
-                data.newtype_variant_seed(ResolvedUnion(
-                    self.0,
-                    usize::try_from(variant)
-                        .ok()
-                        .and_then(|variant| self.1.get(variant).copied())
-                        .ok_or_else(|| {
-                            A::Error::invalid_value(Unexpected::Unsigned(variant), &"variant")
-                        })?,
-                    self.2,
-                ))
-            }
+        struct ResolvedUnion<'schema, CallT> {
+            schema: &'schema Schema,
+            variants: &'schema [SchemaNodeIndex],
+            discriminant: u64,
+            deferred: CallT,
         }
-
-        struct ResolvedUnion<'schema, CallT>(&'schema Schema, SchemaNodeIndex, CallT);
 
         impl<'de, 'schema, CallT> DeserializeSeed<'de> for ResolvedUnion<'schema, CallT>
         where
@@ -380,9 +354,15 @@ where
             where
                 D: Deserializer<'de>,
             {
-                self.2.call(SchemaDeserializer {
-                    schema: self.0,
-                    node: self.0.node(self.1).map_err(D::Error::custom)?,
+                let node_index = usize::try_from(self.discriminant)
+                    .ok()
+                    .and_then(|discriminant| self.variants.get(discriminant).copied())
+                    .ok_or_else(|| {
+                        D::Error::invalid_value(Unexpected::Unsigned(self.discriminant), &"variant")
+                    })?;
+                self.deferred.call(SchemaDeserializer {
+                    schema: self.schema,
+                    node: self.schema.node(node_index).map_err(D::Error::custom)?,
                     inner: deserializer,
                 })
             }
@@ -392,11 +372,23 @@ where
             .schema
             .node_list(variants)
             .map_err(DeserializerT::Error::custom)?;
-        self.inner.deserialize_enum(
-            UNION_ENUM_NAME,
-            deserialized_anonymous_variants(variants.len())?,
-            UnionVisitor(self.schema, variants, call),
-        )
+        if variants.is_empty() {
+            return Err(DeserializerT::Error::custom(
+                "attempted to deserialize a bottom type / empty union",
+            ));
+        }
+
+        ChunkedEnum::deserializable(
+            usize::try_from(usize::BITS - (variants.len() - 1).leading_zeros())
+                .expect("usize should be at least 32 bits"),
+            move |discriminant| ResolvedUnion {
+                schema: self.schema,
+                discriminant,
+                variants,
+                deferred: call,
+            },
+        )?
+        .deserialize(self.inner)
     }
 
     fn unexpected(self) -> Result<Unexpected<'de>, DeserializerT::Error> {
@@ -1043,20 +1035,23 @@ pub struct SchemaStructDeserializer<'schema, InnerT> {
     field_names: &'schema [FieldNameIndex],
     field_types: &'schema [SchemaNodeIndex],
     skip_list: &'schema [MemberIndex],
-    variant: u64,
+    discriminant: u64,
     i_field: usize,
     next_value_schema: Option<SchemaNode>,
     inner: InnerT,
 }
 
-impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
-    pub fn new<ErrorT>(
+impl<'de, 'schema, InnerT> SchemaStructDeserializer<'schema, InnerT>
+where
+    InnerT: serde::de::Visitor<'de>,
+{
+    pub fn seed<ErrorT>(
         schema: &'schema Schema,
         field_names: FieldNameListIndex,
         skip_list: MemberListIndex,
         field_types: SchemaNodeListIndex,
         inner: InnerT,
-    ) -> Result<Self, ErrorT>
+    ) -> Result<impl DeserializeSeed<'de, Value = InnerT::Value>, ErrorT>
     where
         ErrorT: serde::de::Error,
     {
@@ -1064,23 +1059,28 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             .field_name_list(field_names)
             .map_err(ErrorT::custom)?;
         let field_types = schema.node_list(field_types).map_err(ErrorT::custom)?;
+        let skip_list = schema.member_list(skip_list).map_err(ErrorT::custom)?;
+
         if field_names.len() != field_types.len() {
             return Err(ErrorT::custom(
                 "bad schema: struct field name length and type length mismatch",
             ));
         }
-        Ok(Self {
+
+        ChunkedEnum::deserializable(skip_list.len(), move |discriminant| Self {
             schema,
             field_names,
             field_types,
-            skip_list: schema.member_list(skip_list).map_err(ErrorT::custom)?,
-            variant: 0,
+            skip_list,
+            discriminant,
             i_field: 0,
             next_value_schema: None,
             inner,
         })
     }
+}
 
+impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
     fn next<ErrorT>(&mut self) -> Result<Option<(&'schema str, SchemaNode)>, ErrorT>
     where
         ErrorT: serde::de::Error,
@@ -1100,8 +1100,8 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
                 let i_field = self.i_field;
                 self.i_field += 1;
                 if usize::from(i_skip_field) == i_field {
-                    let skipped = (self.variant & 1) == 0;
-                    self.variant >>= 1;
+                    let skipped = (self.discriminant & 1) == 0;
+                    self.discriminant >>= 1;
                     self.skip_list.split_off_first();
                     if skipped {
                         continue;
@@ -1132,27 +1132,21 @@ where
     where
         D: Deserializer<'de>,
     {
-        let num_variant_bits = (self.skip_list.len() - self.i_field).min(8);
-        if num_variant_bits == 0 {
-            deserializer.deserialize_tuple(
-                self.field_names.len()
-                    // Fields that are ALWAYS skipped are not present in `skip_list`, instead
-                    // they're typed as `Union[]`, the bottom type. We need to subtract these from
-                    // the number of field names to work out how many fields we'll actually emit.
-                    - self
-                        .field_types
-                        .iter()
-                        .filter(|field_type| field_type.is_empty())
-                        .count(),
-                self,
-            )
-        } else {
-            deserializer.deserialize_enum(
-                UNION_ENUM_NAME,
-                deserialized_anonymous_variants(1 << num_variant_bits)?,
-                self,
-            )
-        }
+        let length = self.field_names.len()
+            // Discount fields that are present in the `skip_list` and don't have a bit set in
+            // the presence variant.
+            + usize::try_from(self.discriminant.count_ones())
+                .expect("usize needs to be at least 32 bits")
+            - self.skip_list.len()
+            // Fields that are ALWAYS skipped are not present in `skip_list`, instead
+            // they're typed as `Union[]`, the bottom type. We need to subtract these
+            // as well.
+            - self
+                .field_types
+                .iter()
+                .filter(|field_type| field_type.is_empty())
+                .count();
+        deserializer.deserialize_tuple(length, self)
     }
 }
 
@@ -1166,40 +1160,6 @@ where
         self.inner.expecting(formatter)
     }
 
-    fn visit_enum<A>(mut self, data: A) -> Result<Self::Value, A::Error>
-    where
-        A: EnumAccess<'de>,
-    {
-        let num_variant_bits = (self.skip_list.len() - self.i_field).min(8);
-        let (new_variant, data) = data.variant_seed(AnonymousVariantSeed)?;
-        if new_variant >= (1 << num_variant_bits) {
-            return Err(A::Error::custom("unexpected variant for skipped fields"));
-        }
-        self.i_field += num_variant_bits;
-        self.variant = (self.variant << num_variant_bits) | new_variant;
-
-        if self.i_field < self.skip_list.len() {
-            data.newtype_variant_seed(self)
-        } else {
-            self.i_field = 0;
-            let length = self.field_names.len()
-                // Discount fields that are present in the `skip_list` and don't have a bit set in
-                // the presence variant.
-                + usize::try_from(self.variant.count_ones())
-                    .expect("usize needs to be at least 32 bits")
-                - self.skip_list.len()
-                // Fields that are ALWAYS skipped are not present in `skip_list`, instead
-                // they're typed as `Union[]`, the bottom type. We need to subtract these
-                // as well.
-                - self
-                    .field_types
-                    .iter()
-                    .filter(|field_type| field_type.is_empty())
-                    .count();
-            data.tuple_variant(length, self)
-        }
-    }
-
     fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
@@ -1209,7 +1169,7 @@ where
             field_names: self.field_names,
             field_types: self.field_types,
             skip_list: self.skip_list,
-            variant: self.variant,
+            discriminant: self.discriminant,
             i_field: self.i_field,
             next_value_schema: self.next_value_schema,
             inner: seq,
@@ -1309,55 +1269,5 @@ where
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
         bytes byte_buf option unit unit_struct newtype_struct seq tuple
         tuple_struct map struct enum identifier ignored_any
-    }
-}
-
-struct AnonymousVariantSeed;
-
-impl<'de> DeserializeSeed<'de> for AnonymousVariantSeed {
-    type Value = u64;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<u64, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_identifier(self)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for AnonymousVariantSeed {
-    type Value = u64;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(formatter, "a union discriminant")
-    }
-
-    #[inline]
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        Ok(value)
-    }
-
-    #[inline]
-    fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        self.visit_str(str::from_utf8(value).map_err(|_| E::custom("non-utf8 union variant name"))?)
-    }
-
-    #[inline]
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        (if let Some(hex) = value.strip_prefix('_') {
-            u64::from_str_radix(hex, 16).ok()
-        } else {
-            None
-        })
-        .ok_or_else(|| E::custom(format!("bad union variant name {value}")))
     }
 }

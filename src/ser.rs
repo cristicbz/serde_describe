@@ -1,20 +1,17 @@
 use crate::{
     DescribedBy, Schema, Trace,
-    anonymous_union::{UNION_ENUM_NAME, serialized_anonymous_variant},
+    anonymous_union::ChunkedEnum,
     builder::SchemaBuilder,
     described::SelfDescribed,
     indices::{
-        FieldNameIndex, FieldNameListIndex, MemberIndex, MemberListIndex, SchemaNodeIndex,
-        SchemaNodeListIndex,
+        FieldNameListIndex, MemberIndex, MemberListIndex, SchemaNodeIndex, SchemaNodeListIndex,
     },
     schema::SchemaNode,
     trace::{ReadTraceExt, TraceNode},
 };
 use serde::{
     Serialize,
-    ser::{
-        Error as _, SerializeMap, SerializeSeq, SerializeTuple, SerializeTupleVariant, Serializer,
-    },
+    ser::{Error as _, SerializeMap, SerializeSeq, SerializeTuple, Serializer},
 };
 use std::{cell::Cell, fmt::Debug};
 
@@ -68,16 +65,17 @@ struct TraceCursor<'a> {
 #[derive(Copy, Clone)]
 enum CheckResult<'a> {
     Simple,
-    Discriminated(u32, TraceCursor<'a>),
+    Discriminated(usize, usize, TraceCursor<'a>),
 }
 
 impl Debug for CheckResult<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Simple => f.debug_struct("Simple").finish(),
-            Self::Discriminated(discriminator, cursor) => f
+            Self::Discriminated(discriminator, num_variants, cursor) => f
                 .debug_struct("Discriminated")
                 .field("discriminator", &discriminator)
+                .field("num_variants", &num_variants)
                 .field("node", &cursor.node)
                 .finish(),
         }
@@ -218,32 +216,16 @@ impl<'a> TraceCursor<'a> {
             ));
         }
 
-        if skip_list.is_empty() {
-            let mut serializer = serializer.serialize_tuple(length)?;
-            // Even if there are no fields in the `skip_list`, some fields are skipped because
-            // they're of type `Union[]`.
-            //
-            // These are fields that are ALWAYS skipped, so they don't need bits in the variant,
-            // but they also don't need to be emitted.
-            iter_field_indices(presence).try_for_each(|field| {
-                serializer.serialize_element(&self.pop_child(
-                    *node_list.get(usize::from(field)).ok_or_else(|| {
-                        S::Error::custom("member index out of bounds for struct in trace presence")
-                    })?,
-                )?)
-            })?;
-            serializer.end()
-        } else {
-            SkippableStructSerializer {
+        ChunkedEnum::serializable(
+            skip_list.len(),
+            discriminant_from_presence(skip_list, presence),
+            &SkippableStructSerializer {
                 cursor: self,
-                variant: variant_from_presence(skip_list, presence),
                 presence,
-                name_list,
-                skip_list,
                 node_list,
-            }
-            .serialize(serializer)
-        }
+            },
+        )?
+        .serialize(serializer)
     }
 
     // Checks whether the trace matches the schema node.
@@ -324,30 +306,18 @@ impl<'a> TraceCursor<'a> {
             }
 
             (trace, SchemaNode::Union(schema_list)) => {
-                return self
-                    .schema
-                    .node_list(schema_list)
-                    .map_err(ErrorT::custom)?
-                    .iter()
-                    .map(|&node| self.traced_child(node, trace))
-                    .enumerate()
-                    .find(|(_, child)| {
-                        child.as_ref().map_or(true, |child| {
-                            child
-                                .check::<ErrorT>()
-                                .map_or(true, |check| check.is_some())
-                        })
-                    })
-                    .map(
-                        |(discriminant, child)| match (u32::try_from(discriminant), child) {
-                            (Ok(discriminant), Ok(child)) => {
-                                Ok(CheckResult::Discriminated(discriminant, child))
-                            }
-                            (_, Err(error)) => Err(error),
-                            (Err(_), _) => Err(ErrorT::custom("too many types in union")),
-                        },
-                    )
-                    .transpose();
+                let variants = self.schema.node_list(schema_list).map_err(ErrorT::custom)?;
+                for (discriminant, &node) in variants.iter().enumerate() {
+                    let child = self.traced_child(node, trace)?;
+                    if child.check()?.is_some() {
+                        return Ok(Some(CheckResult::Discriminated(
+                            discriminant,
+                            variants.len(),
+                            child,
+                        )));
+                    }
+                }
+                return Ok(None);
             }
 
             _ => false,
@@ -385,13 +355,19 @@ impl<'a> TraceCursor<'a> {
         S: Serializer,
     {
         let data = self.tail;
-        if let CheckResult::Discriminated(discriminant, child) = checked {
-            return serializer.serialize_newtype_variant(
-                UNION_ENUM_NAME,
-                discriminant,
-                serialized_anonymous_variant(discriminant)?,
-                &child,
+        if let CheckResult::Discriminated(discriminant, num_variants, child) = checked {
+            assert!(
+                discriminant < num_variants,
+                "out of bounds discriminant: {discriminant} >= {num_variants}"
             );
+            return ChunkedEnum::serializable(
+                usize::try_from(usize::BITS - (num_variants - 1).leading_zeros())
+                    .expect("usize must be at least 32 bits"),
+                u64::try_from(discriminant)
+                    .map_err(|_| S::Error::custom("too many discriminants"))?,
+                &child,
+            )?
+            .serialize(serializer);
         }
         match self.node {
             SchemaNode::Bool => serializer.serialize_bool(data.pop_bool()?),
@@ -453,9 +429,6 @@ impl<'a> TraceCursor<'a> {
 struct SkippableStructSerializer<'a, 'v> {
     cursor: &'v TraceCursor<'a>,
     presence: &'a [u8],
-    variant: u64,
-    name_list: &'a [FieldNameIndex],
-    skip_list: &'a [MemberIndex],
     node_list: &'a [SchemaNodeIndex],
 }
 
@@ -464,63 +437,37 @@ impl<'a, 'v> Serialize for SkippableStructSerializer<'a, 'v> {
     where
         S: Serializer,
     {
-        if self.skip_list.len() > 64 {
-            return Err(S::Error::custom(
-                "too many struct skippable fields in schema",
-            ));
+        let mut serializer =
+            serializer.serialize_tuple(self.presence.len() / std::mem::size_of::<u32>())?;
+        for field in iter_field_indices(self.presence) {
+            serializer.serialize_element(&self.cursor.pop_child(
+                *self.node_list.get(usize::from(field)).ok_or_else(|| {
+                    S::Error::custom("member index out of bounds for struct in schema")
+                })?,
+            )?)?;
         }
-        let variant = u32::from(self.variant as u8);
-        if let Some((_, skip_list_tail)) = self.skip_list.split_at_checked(8) {
-            serializer.serialize_newtype_variant(
-                UNION_ENUM_NAME,
-                variant,
-                serialized_anonymous_variant(variant)?,
-                &SkippableStructSerializer {
-                    cursor: self.cursor,
-                    presence: self.presence,
-                    variant: self.variant >> 8,
-                    name_list: self.name_list,
-                    skip_list: skip_list_tail,
-                    node_list: self.node_list,
-                },
-            )
-        } else {
-            let mut serializer = serializer.serialize_tuple_variant(
-                UNION_ENUM_NAME,
-                variant,
-                serialized_anonymous_variant(variant)?,
-                self.presence.len() / std::mem::size_of::<u32>(),
-            )?;
-            for field in iter_field_indices(self.presence) {
-                serializer.serialize_field(&self.cursor.pop_child(
-                    *self.node_list.get(usize::from(field)).ok_or_else(|| {
-                        S::Error::custom("member index out of bounds for struct in schema")
-                    })?,
-                )?)?;
-            }
-            serializer.end()
-        }
+        serializer.end()
     }
 }
 
-fn variant_from_presence(skip_list: &[MemberIndex], presence: &[u8]) -> u64 {
-    let mut variant = 0u64;
+fn discriminant_from_presence(skip_list: &[MemberIndex], presence: &[u8]) -> u64 {
+    let mut discriminant = 0u64;
     let mut presence = iter_field_indices(presence).rev().peekable();
     for &skip in skip_list.iter().rev() {
-        variant <<= 1;
+        discriminant <<= 1;
         while let Some(&present) = presence.peek() {
             if present > skip {
                 presence.next();
                 continue;
             }
             if present == skip {
-                variant |= 1;
+                discriminant |= 1;
                 presence.next();
             }
             break;
         }
     }
-    variant
+    discriminant
 }
 
 fn iter_field_indices(presence: &[u8]) -> impl DoubleEndedIterator<Item = MemberIndex> {

@@ -168,7 +168,6 @@ impl From<TraceLimitErrorKind> for TraceError {
 pub struct TraceLimitError(#[from] TraceLimitErrorKind);
 
 pub(crate) const MAX_SKIPPABLE_FIELDS: usize = 64;
-pub(crate) const MAX_UNION_VARIANTS: usize = 256;
 
 #[derive(Debug, Error)]
 pub(crate) enum TraceLimitErrorKind {
@@ -557,7 +556,9 @@ impl SchemaBuilderNode {
                     .collect::<Result<Vec<_>, _>>()?;
                 variants.sort_unstable();
                 variants.dedup();
-                if variants.len() > MAX_UNION_VARIANTS {
+                if variants.len()
+                    > usize::try_from(u32::MAX).expect("usize must be at least 32 bits")
+                {
                     return Err(TraceError::from(TraceLimitErrorKind::UnionVariants));
                 }
                 SchemaNode::Union(builder.node_lists.intern_from(variants)?)
