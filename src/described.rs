@@ -89,7 +89,7 @@ use crate::Schema;
 ///
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub struct SelfDescribed<T>(pub T);
 
 /// Wraps a serializable and/or deserializable type together with a reference to a [`Schema`].
@@ -102,3 +102,20 @@ pub struct SelfDescribed<T>(pub T);
 /// complete example.
 #[derive(Copy, Clone)]
 pub struct DescribedBy<'schema, T>(pub T, pub &'schema Schema);
+
+impl<T> From<T> for SelfDescribed<T> {
+    #[inline]
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> PartialEq<T> for SelfDescribed<T>
+where
+    T: PartialEq<T>,
+{
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        self.0 == *other
+    }
+}
