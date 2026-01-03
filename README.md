@@ -6,6 +6,8 @@ Make a non-self-describing [`serde`](https://docs.rs/serde) format (like [`binco
 behave as if it were self-describing by transparently serializing a schema
 alongside (or separately from) the data.
 
+# Example
+
 ```rust
 use serde::{Deserialize, Serialize};
 use serde_describe::{Schema, SelfDescribed};
