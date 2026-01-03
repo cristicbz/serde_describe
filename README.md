@@ -1,10 +1,11 @@
-serde_describe
----
+# serde_describe
 
 Make a non-self-describing [`serde`](https://docs.rs/serde) format (like [`bincode`](https://docs.rs/bincode2),
 [`bitcode`](https://docs.rs/bitcode) or [`postcard`](https://docs.rs/postcard))
 behave as if it were self-describing by transparently serializing a schema
 alongside (or separately from) the data.
+
+## Example
 
 ```rust
 use serde::{Deserialize, Serialize};
