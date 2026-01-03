@@ -54,6 +54,7 @@ pub(crate) enum TraceNode {
 /// [`SchemaBuilder::build`][`crate::SchemaBuilder::build`] method of the same
 /// [`SchemaBuilder`][`crate::SchemaBuilder`] used to produce the value.
 #[derive(Default, Clone)]
+#[must_use = "a trace is only useful if it's later serialized with the resulting schema"]
 pub struct Trace(pub(crate) Vec<u8>);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]

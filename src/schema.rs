@@ -22,7 +22,7 @@ use crate::{
 /// For simple use-cases where the [`Schema`] should be serialized together with the data, use
 /// the [`SelfDescribed`][`crate::SelfDescribed`] wrapper, which obviates the need for an
 /// explicitly managed [`Schema`] object.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Schema {
     pub(crate) root_index: SchemaNodeIndex,
     pub(crate) nodes: ReadonlyPool<SchemaNode, SchemaNodeIndex>,

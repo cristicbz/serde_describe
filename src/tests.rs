@@ -1,5 +1,5 @@
 use crate::described::SelfDescribed;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 fn if_zero(value: &u32) -> bool {

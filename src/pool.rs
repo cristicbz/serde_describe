@@ -4,7 +4,7 @@ use std::{borrow::Borrow, hash::Hash, marker::PhantomData};
 
 use crate::indices::{IndexIsEmpty, IsEmpty};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Pool<ValueT, ValueIndexT> {
     inner: IndexSet<ValueT>,
     _dummy: PhantomData<ValueIndexT>,
@@ -85,7 +85,7 @@ where
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ReadonlyPool<ValueT, ValueIndexT> {
     values: Box<[ValueT]>,
@@ -122,7 +122,7 @@ where
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ReadonlyNonEmptyPool<ValueT, ValueIndexT> {
     values: Box<[ValueT]>,
