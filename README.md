@@ -89,10 +89,7 @@ fundamental architectural constraints and they could all be removed
 backwards-compatibly if there is sufficient demand / motivation to do so.
 
 * **Objects must be < ~4GiB in size.** More precisely, the various indices used
-  internally by the library need to fit in 32-bit unsigned integers //! * At
-  most 64 "skippable" fields. This can be lifted by using a `BitVec` instead of
-  as single. This includes the overall size of the object, but also the number
-  of items in a collection etc.
+  internally by the library need to fit in 32-bit unsigned integers*
 * **ZST collections are not special-cased.** A `vec![(); u32::MAX]`, will take
   an unnecessary amount of memory and time to serialize.
 * **Structs can have at most 64 skippable fields.** These are fields that, in
