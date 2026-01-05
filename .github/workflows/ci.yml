@@ -46,11 +46,11 @@ jobs:
 
     - name: Check formatting
       run: |
-        cargo fmt --all -- --check
+        cargo --locked fmt --all -- --check
 
     - name: Check clippy
       run: |
-        cargo clippy --all --all-targets --all-features -- -Dwarnings
+        cargo --locked clippy --all --all-targets --all-features -- -Dwarnings
 
   test:
     runs-on: ubuntu-latest
@@ -83,9 +83,9 @@ jobs:
 
     - name: Run unit & integration tests
       run: |
-        ./cargo-nextest nextest --profile ci run
+        ./cargo-nextest nextest --profile ci run --locked
 
     - name: Run doctests
       run: |
-        cargo test --doc
+        cargo --locked test --doc
 
