@@ -1,9 +1,15 @@
+[![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](https://github.com/cristicbz/serde_describe#license)
+[![Crates.io](https://img.shields.io/crates/v/serde_describe.svg)](https://crates.io/crates/serde_describe)
+[![Docs](https://docs.rs/serde_describe/badge.svg)](https://docs.rs/serde_describe/latest/serde_describe/)
+[![CI](https://github.com/cristicbz/serde_describe/actions/workflows/ci.yml/badge.svg)](https://github.com/cristicbz/serde_describe/actions/workflows/ci.yml)
+
 # serde_describe
 
 Make a non-self-describing [`serde`](https://docs.rs/serde) format (like
 [`bincode`](https://docs.rs/bincode2), [`bitcode`](https://docs.rs/bitcode) or
-[`postcard`](https://docs.rs/postcard)) behave as if it were self-describing by
-transparently serializing a schema alongside (or separately from) the data.
+[`postcard`](https://docs.rs/postcard)) behave as like a self-describing one by
+transparently serializing a schema alongside (or [separately
+from](#advanced-usage-external-schema)) the data.
 
 
 ```rust
@@ -64,19 +70,37 @@ and finally serialization speed.
   representation should end up more compact than most self-describing formats
   for large enough objects, as type information (shapes, field names and
   variant names) is deduplicated across the entire object. See the [Advanced
-  Usage](#advanced-usage) section on how to amortize the schema overhead across
+  Usage](#advanced-usage-external-schema) section on how to amortize the schema overhead across
   multiple objects as well.
 
 * **Serialization Speed**. The library is optimized for data that is written
   once and read many times. As such, various schema optimization passes are
-  performed to keep the schema size small (and not grow unboundedly with the
+  performed to keep the schema size small (and not grow unbounded with the
   input data).
 
-Note that these goals are, at this point, mostlya spirational and reflect only
-high-level architectural choices. On the nuts and bolts of the implementation,
-the crate hasn't gone through extensive profiling and optimization yet.
+Note that these goals are, at this point, mostly a statement of intent and
+reflect only high-level architectural choices. On the nuts and bolts of the
+implementation, the crate hasn't gone through extensive profiling and
+optimization yet.
 
-## Advanced Usage: External Schema
+## Current limitations
+The crate's current implementation has a few limitations. None of these are
+fundamental architectural constraints and they could all be removed
+backwards-compatibly if there is sufficient demand / motivation to do so.
+
+* **Objects must be < ~4GiB in size.** More precisely, the various indices used
+  internally by the library need to fit in 32-bit unsigned integers //! * At
+  most 64 "skippable" fields. This can be lifted by using a `BitVec` instead of
+  as single. This includes the overall size of the object, but also the number
+  of items in a collection etc.
+* **ZST collections are not special-cased.** A `vec![(); u32::MAX]`, will take
+  an unnecessary amount of memory and time to serialize.
+* **Structs can have at most 64 skippable fields.** These are fields that, in
+  any given trace, appear as both present and absent. Fields that are always
+  present or always absent (irrespective of their
+  `#[serde(skip_serializing_if)]` attributes) do not count towards this limit.
+
+## Advanced usage: external schema
 
 As shown above, the simplest way to use this library is to simply wrap your
 data in `SelfDescribed`. However, if you're storing many objects of the same
@@ -95,19 +119,25 @@ struct Item {
     tag: Option<String>,
 }
 
-let bytes1 = postcard::to_stdvec(&SelfDescribed(Item { id: 1, tag: Some("foo".to_owned()) }))?;
-let bytes2 = postcard::to_stdvec(&SelfDescribed(Item { id: 2, tag: None }))?;
+let bytes1 = postcard::to_stdvec(
+    &SelfDescribed(Item { id: 1, tag: Some("foo".to_owned()) }),
+)?;
+let bytes2 = postcard::to_stdvec(
+    &SelfDescribed(Item { id: 2, tag: None }),
+)?;
 assert_eq!(bytes1.len(), 41);
 assert_eq!(bytes1.len() + bytes2.len(), 75);
 
-let SelfDescribed(item1) = postcard::from_bytes::<SelfDescribed<Item>>(&bytes1)?;
-let SelfDescribed(item2) = postcard::from_bytes::<SelfDescribed<Item>>(&bytes2)?;
+let SelfDescribed(item1) =
+    postcard::from_bytes::<SelfDescribed<Item>>(&bytes1)?;
+let SelfDescribed(item2) =
+    postcard::from_bytes::<SelfDescribed<Item>>(&bytes2)?;
 assert_eq!([item1.id, item2.id], [1, 2]);
 
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-To avoid this overhead, `serde_describe` supports the `SchemaBuilder` API,
+To avoid this overhead, `serde_describe` supports the `SchemaBuilder` API
 which, while more complicated to use, makes schema serialization and
 deserialization explicit and separate from the data
 
@@ -144,10 +174,12 @@ assert_eq!(bytes1.len() + bytes2.len() + bytes_schema.len(), 46);
 // `DeserializeSeed` so the underlying format needs to have a public API that
 // supports it.
 let schema = postcard::from_bytes::<Schema>(&bytes_schema)?;
-let item1: Item =
-    schema.deserialize_described(&mut postcard::Deserializer::from_bytes(&bytes1))?;
-let item2: Item =
-    schema.deserialize_described(&mut postcard::Deserializer::from_bytes(&bytes2))?;
+let item1: Item = schema.deserialize_described(
+    &mut postcard::Deserializer::from_bytes(&bytes1),
+)?;
+let item2: Item = schema.deserialize_described(
+    &mut postcard::Deserializer::from_bytes(&bytes2),
+)?;
 assert_eq!([item1.id, item2.id], [1, 2]);
 
 // You can also get a human-readable view of the inferred schema for debugging
@@ -160,13 +192,20 @@ assert_eq!(
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## How It Works
+## How it works
 
-Serializing a `SelfDescribed` is a two-pass process
- 1. An internal serializer is run on the given value which produces a `Trace`
-    and `Schema`.
- 2. The underlying serializer is called on the pair of `(schema,
+You can completely skip this section unless you're curious about the
+internal implementation of the library.
+
+Serializing anything with `serde_describe` is a two-pass process
+(`SelfDescribed` simply does both of these two phases for you)
+ 1. An serializer runs on the given value producing a `Trace` and a `Schema`.
+ 2. The underlying serializer is used to save the pair of `(schema,
     transform(schema, trace))`.
+
+At deserialization time, a `Deserializer` is built which wraps the underlying
+deserializer and walks the schema graph performing coercions and calling the
+appropriate `serde::de::Visitor` methods.
 
 We'll tackle the trace, schema and transform in turn.
 
@@ -177,16 +216,17 @@ made on the internal serializer (`serialize_u32`, `serialize_struct`,
 `serialize_struct(field_name, ...)` etc).
 
 The upside of using this intermediate representation is that it side-steps any
-risks of non-deterministic serialization. It is also structured such that
+risks of non-deterministic serialization and its structure is chosen such that
 matching back to the `Schema` later is simpler. The downside is that it
 potentially doubles the amount of memory required during serialization, and it
-is almost certainly slower too.
+is almost certainly slower than serializing the same type again would be.
 
 ### Schema
 The `schema` contains interned type, field and variant names, as well as a
 graph for the finite state machine describing how to parse the stored object.
+
 Importantly, it is a representation of the **serialized** data, not of the
-actual, abstract type definition from Rust. So if certain kinds of data are
+actual abstract type definition from Rust. So if certain kinds of data are
 never observed, information about them isn't serialized, saving space. The
 upshot is that this makes a particular schema only useful with the data that
 was traced to generate it, not generally useful for any value of given type.
@@ -298,8 +338,8 @@ seq_12(
 );
 ```
 
-Each type gets displayed with a `_<id>` suffix which maps to the a unqiue node
-id in the FSM graph. This way, the mostly tree-like schema can be displayed as
+Each type gets displayed with a `_<id>` suffix which maps to a unique node id
+in the FSM graph. This way, the mostly tree-like schema can be displayed as
 such, even though in reality it has cycles and repeated nodes. Children of
 previously expanded nodes nodes are simply shown as `..`; see for instance
 `union_4(..)`, not repeating the previous `union_4(none_1, some_3(str_2))`.
@@ -335,7 +375,7 @@ doesn't appear in `union_7`, because it's never serialized.
 ### Transform
 The `transform` function converts the object into a subset of `serde` features
 that are supported by non-self-describing formats. In particular:
- 1. Unions (as seen above) are used to turn heterogenous sequences and maps
+ 1. Unions (as seen above) are used to turn heterogeneous sequences and maps
     into homogeneous collections of discriminated enums.
  2. Union discriminants rely on variant index, with original enum variant names
     deduplicated and stored in the schema.

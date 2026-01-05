@@ -1,9 +1,55 @@
-//! TODO: crate level docs
+//! Make a non-self-describing [`serde`](https://docs.rs/serde) format (like
+//! [`bincode`](https://docs.rs/bincode2), [`bitcode`](https://docs.rs/bitcode) or
+//! [`postcard`](https://docs.rs/postcard)) behave as like a self-describing one by transparently
+//! serializing a schema alongside (or [separately from](#advanced-usage-external-schema)) the
+//! data.
 //!
-//! Known limitations:
-//! * At most 64 "skippable" fields. This can be lifted by using a `BitVec` instead of as single
-//!   u64 to keep track of them. This is a backwards compatible change that can be made in the
-//!   future.
+//! The main entry point to the crate is [`SelfDescribed`]. For advanced uses [`SchemaBuilder`]
+//! and [`Schema`] may also be of interest.
+//!
+//! ```
+//! use serde::{Deserialize, Serialize};
+//! use serde_describe::{Schema, SelfDescribed};
+//!
+//! // Define a type that non-self-describing formats would generally struggle
+//! // with, using skipped fields and untagged unions.
+//! #[derive(Debug, PartialEq, Serialize, Deserialize)]
+//! struct TopLevel {
+//!     int32: u32,
+//!
+//!     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+//!     items: Vec<Item>,
+//! }
+//!
+//! #[derive(Debug, PartialEq, Serialize, Deserialize)]
+//! #[serde(untagged)]
+//! enum Item {
+//!     Int(u32),
+//!     Str(String),
+//! }
+//!
+//! // Serialize a `Vec<TopLevel>` using the `SelfDescribed` wrapper and bitcode, a
+//! // particularly restrictive binary format.
+//! let original = vec![
+//!     TopLevel {
+//!         int32: 10,
+//!         items: vec![Item::Str("hello".to_owned()), Item::Int(10)],
+//!     },
+//!     TopLevel {
+//!         int32: 20,
+//!         items: Vec::new(),
+//!     },
+//! ];
+//! let bytes = bitcode::serialize(&SelfDescribed(&original))?;
+//!
+//! // Then deserialize using the same wrapper to use the embedded schema.
+//! let roundtripped =
+//!     bitcode::deserialize::<SelfDescribed<Vec<TopLevel>>>(&bytes)?;
+//! assert_eq!(roundtripped, original);
+//!
+//! # Ok::<_, Box<dyn std::error::Error>>(())
+//! ```
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub(crate) mod anonymous_union;

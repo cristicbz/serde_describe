@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "serde_describe"
-version = "0.0.6"
+version = "0.1.6"
 dependencies = [
  "bitcode",
  "indexmap",
