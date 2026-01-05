@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  merge_group:
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+  - cron: '00 01 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: ${{github.event_name == 'pull_request'}}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+
+    - name: Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+        components: rustfmt,clippy
+
+    - name: Check formatting
+      run: |
+        cargo fmt --all -- --check
+
+    - name: Check clippy
+      run: |
+        cargo clippy --all --all-targets --all-features -- -Dwarnings
+
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+
+    - name: Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+        components: rustfmt
+
+    - name: Install nextest
+      run: |
+        curl -sSL https://get.nexte.st/latest/x86_64-unknown-linux-musl.tar.gz -o nextest.tar.gz
+        tar xvf nextest.tar.gz && rm nextest.tar.gz
+
+    - name: Run unit & integration tests
+      run: |
+        ./cargo-nextest nextest --profile ci run
+
+    - name: Run doctests
+      run: |
+        cargo test --doc
+
