@@ -59,6 +59,7 @@ pub(crate) mod deferred;
 pub(crate) mod described;
 pub(crate) mod dump;
 pub(crate) mod indices;
+pub(crate) mod lossless_cast;
 pub(crate) mod pool;
 pub(crate) mod schema;
 pub(crate) mod ser;
