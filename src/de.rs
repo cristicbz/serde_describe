@@ -16,6 +16,7 @@ use crate::{
         FieldNameIndex, FieldNameListIndex, IsEmpty, MemberIndex, MemberListIndex, SchemaNodeIndex,
         SchemaNodeListIndex, VariantNameIndex,
     },
+    lossless_cast::LosslessCast,
     schema::SchemaNode,
 };
 
@@ -253,63 +254,44 @@ where
     {
         match self.node {
             SchemaNode::Union(variants) => self.deserialize_union(variants, call),
-            SchemaNode::OptionSome(inner)
-            | SchemaNode::NewtypeStruct(_, inner)
-            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
+            SchemaNode::OptionSome(inner) | SchemaNode::NewtypeStruct(_, inner) => {
+                call.call(self.forward(inner)?)
+            }
             actual if condition(actual) => call.call(self.inner),
             _ => self.invalid_type_error(&call),
         }
     }
 
     #[inline]
-    fn deserialize_float<CallT>(
-        self,
-        convert_f64: impl FnOnce(f64) -> CallT::CanonicalInput,
-        call: CallT,
-    ) -> CallResult<'de, CallT, DeserializerT>
+    fn deserialize_number<CallT>(self, call: CallT) -> CallResult<'de, CallT, DeserializerT>
     where
         CallT: CanonicalVisit<'de>,
-        CallT::CanonicalInput: From<f32>,
+        u8: LosslessCast<CallT::CanonicalInput>,
+        u16: LosslessCast<CallT::CanonicalInput>,
+        u32: LosslessCast<CallT::CanonicalInput>,
+        u64: LosslessCast<CallT::CanonicalInput>,
+        u128: LosslessCast<CallT::CanonicalInput>,
+        i8: LosslessCast<CallT::CanonicalInput>,
+        i16: LosslessCast<CallT::CanonicalInput>,
+        i32: LosslessCast<CallT::CanonicalInput>,
+        i64: LosslessCast<CallT::CanonicalInput>,
+        i128: LosslessCast<CallT::CanonicalInput>,
+        f32: LosslessCast<CallT::CanonicalInput>,
+        f64: LosslessCast<CallT::CanonicalInput>,
     {
-        match self.node {
-            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
-            SchemaNode::OptionSome(inner)
-            | SchemaNode::NewtypeStruct(_, inner)
-            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
-            SchemaNode::F32 => call.canonical_visit(f32::deserialize(self.inner)?.into()),
-            SchemaNode::F64 => call.canonical_visit(convert_f64(f64::deserialize(self.inner)?)),
-            _ => self.invalid_type_error(&call),
-        }
-    }
-
-    #[inline]
-    fn deserialize_integer<CallT>(self, call: CallT) -> CallResult<'de, CallT, DeserializerT>
-    where
-        CallT: CanonicalVisit<'de>,
-        CallT::CanonicalInput: TryFrom<u8>
-            + TryFrom<u16>
-            + TryFrom<u32>
-            + TryFrom<u64>
-            + TryFrom<u128>
-            + TryFrom<i8>
-            + TryFrom<i16>
-            + TryFrom<i32>
-            + TryFrom<i64>
-            + TryFrom<i128>,
-    {
-        macro_rules! integer_conversion {
+        macro_rules! number_conversion {
             ($type:ident, $visit_fn:ident, Other($text:expr)) => {
-                integer_conversion!(@common, $type, $visit_fn, integer, {Unexpected::Other($text)})
+                number_conversion!(@common, $type, $visit_fn, number, {Unexpected::Other($text)})
             };
             ($type:ident, $visit_fn:ident, $unexpected:ident) => {
-                integer_conversion!(@common, $type, $visit_fn, integer, Unexpected::$unexpected(integer.into()))
+                number_conversion!(@common, $type, $visit_fn, number, Unexpected::$unexpected(number.into()))
             };
             (@common, $type:ident, $visit_fn:ident, $int:ident, $unexpected:expr) => {
                 {
                     let $int = $type::deserialize((self).inner)?;
-                    match TryFrom::try_from($int) {
-                        Ok(integer) => call.canonical_visit(integer),
-                        Err(_) => <CallT::Visitor as serde::de::Visitor<'de>>::$visit_fn(call.into_visitor(), $int),
+                    match $int.lossless_cast() {
+                        Some(number) => call.canonical_visit(number),
+                        None => <CallT::Visitor as serde::de::Visitor<'de>>::$visit_fn(call.into_visitor(), $int),
                     }
                 }
             };
@@ -321,21 +303,24 @@ where
             | SchemaNode::NewtypeStruct(_, inner)
             | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
 
-            SchemaNode::I8 => integer_conversion!(i8, visit_i8, Signed),
-            SchemaNode::I16 => integer_conversion!(i16, visit_i16, Signed),
-            SchemaNode::I32 => integer_conversion!(i32, visit_i32, Signed),
-            SchemaNode::I64 => integer_conversion!(i64, visit_i64, Signed),
+            SchemaNode::I8 => number_conversion!(i8, visit_i8, Signed),
+            SchemaNode::I16 => number_conversion!(i16, visit_i16, Signed),
+            SchemaNode::I32 => number_conversion!(i32, visit_i32, Signed),
+            SchemaNode::I64 => number_conversion!(i64, visit_i64, Signed),
             SchemaNode::I128 => {
-                integer_conversion!(i128, visit_i128, Other("128-bit signed integer"))
+                number_conversion!(i128, visit_i128, Other("128-bit signed integer"))
             }
 
-            SchemaNode::U8 => integer_conversion!(u8, visit_u8, Unsigned),
-            SchemaNode::U16 => integer_conversion!(u16, visit_u16, Unsigned),
-            SchemaNode::U32 => integer_conversion!(u32, visit_u32, Unsigned),
-            SchemaNode::U64 => integer_conversion!(u64, visit_u64, Unsigned),
+            SchemaNode::U8 => number_conversion!(u8, visit_u8, Unsigned),
+            SchemaNode::U16 => number_conversion!(u16, visit_u16, Unsigned),
+            SchemaNode::U32 => number_conversion!(u32, visit_u32, Unsigned),
+            SchemaNode::U64 => number_conversion!(u64, visit_u64, Unsigned),
             SchemaNode::U128 => {
-                integer_conversion!(u128, visit_u128, Other("128-bit unsigned integer"))
+                number_conversion!(u128, visit_u128, Other("128-bit unsigned integer"))
             }
+
+            SchemaNode::F32 => number_conversion!(f32, visit_f32, Float),
+            SchemaNode::F64 => number_conversion!(f64, visit_f64, Float),
 
             _ => self.invalid_type_error(&call),
         }
@@ -471,12 +456,8 @@ macro_rules! deserialize_simple {
         deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_if(|node| matches!(node, $node), deferred::$fn_name { visitor }))}
     };
 
-    ($fn_name:ident, @integer) => {
-        deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_integer(deferred::$fn_name { visitor }))}
-    };
-
-    ($fn_name:ident, @float) => {
-        deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_float(|value| value as _, deferred::$fn_name { visitor }))}
+    ($fn_name:ident, @number) => {
+        deserialize_simple!{@helper, $fn_name, self, visitor, (self.deserialize_number(deferred::$fn_name { visitor }))}
     };
 
     (@helper, $fn_name:ident, $self:ident, $visitor:ident, $with:tt) => {
@@ -551,18 +532,18 @@ where
     }
 
     deserialize_simple! { deserialize_bool, SchemaNode::Bool }
-    deserialize_simple! { deserialize_i8, @integer }
-    deserialize_simple! { deserialize_i16, @integer }
-    deserialize_simple! { deserialize_i32, @integer }
-    deserialize_simple! { deserialize_i64, @integer }
-    deserialize_simple! { deserialize_i128, @integer }
-    deserialize_simple! { deserialize_u8, @integer }
-    deserialize_simple! { deserialize_u16, @integer }
-    deserialize_simple! { deserialize_u32, @integer }
-    deserialize_simple! { deserialize_u64, @integer }
-    deserialize_simple! { deserialize_u128, @integer }
-    deserialize_simple! { deserialize_f32, @float }
-    deserialize_simple! { deserialize_f64, @float }
+    deserialize_simple! { deserialize_i8, @number }
+    deserialize_simple! { deserialize_i16, @number }
+    deserialize_simple! { deserialize_i32, @number }
+    deserialize_simple! { deserialize_i64, @number }
+    deserialize_simple! { deserialize_i128, @number }
+    deserialize_simple! { deserialize_u8, @number }
+    deserialize_simple! { deserialize_u16, @number }
+    deserialize_simple! { deserialize_u32, @number }
+    deserialize_simple! { deserialize_u64, @number }
+    deserialize_simple! { deserialize_u128, @number }
+    deserialize_simple! { deserialize_f32, @number }
+    deserialize_simple! { deserialize_f64, @number }
     deserialize_simple! { deserialize_char, SchemaNode::Char }
 
     deserialize_simple! { deserialize_str, SchemaNode::String }
