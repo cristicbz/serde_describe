@@ -11,6 +11,22 @@ Make a non-self-describing [`serde`](https://docs.rs/serde) format (like
 transparently serializing a schema alongside (or [separately
 from](#advanced-usage-external-schema)) the data.
 
+In the simplest case it's simply adding a newtype-wrapper around your data
+
+```norust
+let bytes = bitcode::serialize(&original)?;
+let roundtripped: Original = bitcode::deserialize(&bytes)?;
+```
+
+becomes
+
+```norust
+let bytes = bitcode::serialize(&SelfDescribed(&original))?;
+let SelfDescribed(roundtripped): SelfDescribed<Original> =
+  bitcode::deserialize(&bytes)?;
+```
+
+Or, for a working example
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -48,35 +64,35 @@ let original = vec![
 let bytes = bitcode::serialize(&SelfDescribed(&original))?;
 
 // Then deserialize using the same wrapper to use the embedded schema.
-let roundtripped =
-    bitcode::deserialize::<SelfDescribed<Vec<TopLevel>>>(&bytes)?;
+let roundtripped: SelfDescribed<Vec<TopLevel>> =
+    bitcode::deserialize(&bytes)?;
 assert_eq!(roundtripped, original);
 
 # Ok::<_, Box<dyn std::error::Error>>(())
 ```
 
 ## Trade-offs
-Broadly, the library prioritizes, in order, deserialization speed, size speed
-and finally serialization speed.
+At a high level, the library prioritizes deserialization speed and size on the
+wire at the expense of serialization speed.
 
 * **Deserialization Speed**. Should only introduce a small amount of overhead
   compared to the underlying format. The only additional operations performed
   are validation and dispatching based on a relatively small, cache-friendly
   schema object. In addition to the schema object itself, the only other data
-  the wrapper adds is discriminants to tag dynamically shaped data (structs
-  with skipped fields and enums).
+  the wrapper adds is discriminants to tag dynamically shaped data (enums,
+  tagged or otherwise, and structs with skipped fields).
 
 * **Size**. Given a compact underlying format, the `SelfDescribed`
-  representation should end up more compact than most self-describing formats
-  for large enough objects, as type information (shapes, field names and
-  variant names) is deduplicated across the entire object. See the [Advanced
-  Usage](#advanced-usage-external-schema) section on how to amortize the schema overhead across
-  multiple objects as well.
+  representation should end up more compact than typical self-describing
+  formats for large enough objects, as type information (shapes, field names
+  and variant names) is deduplicated across the entire object. See the
+  [Advanced Usage](#advanced-usage-external-schema) section on how to go
+  further and amortize the schema overhead across multiple objects as well.
 
 * **Serialization Speed**. The library is optimized for data that is written
-  once and read many times. As such, various schema optimization passes are
-  performed to keep the schema size small (and not grow unbounded with the
-  input data).
+  once and read many times. As such, various, potentially expensive, schema
+  optimization passes are performed to keep the schema size small (and not grow
+  unbounded with the input data).
 
 Note that these goals are, at this point, mostly a statement of intent and
 reflect only high-level architectural choices. On the nuts and bolts of the
@@ -90,8 +106,6 @@ backwards-compatibly if there is sufficient demand / motivation to do so.
 
 * **Objects must be < ~4GiB in size.** More precisely, the various indices used
   internally by the library need to fit in 32-bit unsigned integers*
-* **ZST collections are not special-cased.** A `vec![(); u32::MAX]`, will take
-  an unnecessary amount of memory and time to serialize.
 * **Structs can have at most 64 skippable fields.** These are fields that, in
   any given trace, appear as both present and absent. Fields that are always
   present or always absent (irrespective of their
@@ -101,9 +115,10 @@ backwards-compatibly if there is sufficient demand / motivation to do so.
 
 As shown above, the simplest way to use this library is to simply wrap your
 data in `SelfDescribed`. However, if you're storing many objects of the same
-type that you need to access independently (so you can't simply serialize a
-`Vec<Item>`), then saving them each as `SelfDescribed` adds unnecessary
-overhead due to repeatedly serializing the schema with each object
+type and you need to deserialize them independently (so you can't simply
+serialize a `Vec<Item>`), then saving each one as a separate `SelfDescribed`
+object adds unnecessary overhead due to repeatedly serializing the schema with
+each object
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -122,7 +137,10 @@ let bytes1 = postcard::to_stdvec(
 let bytes2 = postcard::to_stdvec(
     &SelfDescribed(Item { id: 2, tag: None }),
 )?;
+
+// Quite a few bytes per item, despite the objects' small size:
 assert_eq!(bytes1.len(), 41);
+assert_eq!(bytes2.len(), 34);
 assert_eq!(bytes1.len() + bytes2.len(), 75);
 
 let SelfDescribed(item1) =
@@ -164,6 +182,8 @@ let bytes_schema = postcard::to_stdvec(&schema)?;
 // Each individual serialized object is now very small and the combined size of
 // the two objects + schema is still smaller, as the schema is only saved once.
 assert_eq!(bytes1.len(), 6);
+assert_eq!(bytes2.len(), 2);
+assert_eq!(bytes_schema.len(), 38);
 assert_eq!(bytes1.len() + bytes2.len() + bytes_schema.len(), 46);
 
 // To deserialize the data, first load the schema, then use it to deserialize
@@ -191,8 +211,8 @@ assert_eq!(
 
 ## How it works
 
-You can completely skip this section unless you're curious about the
-internal implementation of the library.
+You can completely skip this section unless you're curious about the internal
+implementation of the library.
 
 Serializing anything with `serde_describe` is a two-pass process
 (`SelfDescribed` simply does both of these two phases for you)
@@ -391,19 +411,19 @@ This is what the RON dump of the object from the `Schema` example, annotated
 with comments and cleaned up a bit.
 
 ```ron
-// seq_8
+// seq_12
 [
     // Parent_11::_01 (discriminant means the `sometimes_skipped` field is present)
     _01(
-        // never_skipped:
+        // .never_skipped: seq_8
         [
             // union_7::_00 => Child::WithData_5
             _00(
                 // mixed: union_4::_00 => None
                 _00,
 
-                // always_some: (no Some("...") or discriminant, as it's never None)
-                "value1",
+                // always_some: some_3(str_2)
+                "value1",  // (no Some("...") or discriminant, as it's never None)
             ),
 
             // union_7::_00 => Child::WithData_5
@@ -413,29 +433,29 @@ with comments and cleaned up a bit.
             _01,
         ],
 
-        // sometimes_skipped: (no discriminant as it's never None when present)
-        1234,
+        // .sometimes_skipped: some_10
+        1234, // (no discriminant as it's never None when present)
 
-        // tag: union_4::_00 => None
-        _00,
+        // .tag: union_4
+        _00,  // _00 => none_1
     ),
 
     // Parent_11::_00 (`sometimes_skipped` absent)
     _00(
-        // never_skipped:
+        // .never_skipped:
         [
             // union_7::_00 => Child::WithData_5
             _00(
-                // mixed: union_4::_01 => Some(String)
+                // .mixed: union_4::_01 => Some(String)
                 _01("value3"),
 
-                // always_some:
+                // .always_some: some_3(str_2)
                 "value4",
             ),
         ],
 
-        // tag: union_4::_01 => Some(String)
-        _01("tag_value"),
+        // tag: union_4
+        _01("tag_value"),  // ::_01 => some_3(str_2)
     ),
 ]
 ```
