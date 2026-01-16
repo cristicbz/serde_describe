@@ -1,8 +1,8 @@
 [package]
 name = "serde_describe"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
-description = "Wrappers to make non-self-describing serde formats behave as if they were self-describing."
+description = "Make non-self-describing serde formats behave like they're self-describing."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cristicbz/serde_describe"
 authors = ["Cristi Cobzarenco <cristi.cobzarenco@gmail.com>"]
@@ -12,8 +12,8 @@ rust-version = "1.88"
 
 [dependencies]
 indexmap = "2"
-serde = { version = "1.0.113", features = ["derive"] }
-thiserror = "2.0"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 
 [dev-dependencies]
 bitcode = { version = "0.6", features = ["serde"] }
