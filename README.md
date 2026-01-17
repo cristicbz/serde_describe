@@ -7,30 +7,29 @@
 
 Make a non-self-describing [`serde`](https://docs.rs/serde) format (like
 [`bincode`](https://docs.rs/bincode2), [`bitcode`](https://docs.rs/bitcode) or
-[`postcard`](https://docs.rs/postcard)) behave as a self-describing one by
-transparently serializing a schema alongside (or [separately
-from](#advanced-usage-external-schema)) the data.
+[`postcard`](https://docs.rs/postcard)) behave like a self-describing one by
+transparently serializing a schema alongside the data.
 
-In the simplest case it's simply adding a newtype-wrapper around your data
+In the simplest case you just add a newtype-wrapper around your data
 
-```norust
+```rust,ignore
 let bytes = bitcode::serialize(&original)?;
 let roundtripped: Original = bitcode::deserialize(&bytes)?;
 ```
 
 becomes
 
-```norust
+```rust,ignore
 let bytes = bitcode::serialize(&SelfDescribed(&original))?;
 let SelfDescribed(roundtripped): SelfDescribed<Original> =
-  bitcode::deserialize(&bytes)?;
+    bitcode::deserialize(&bytes)?;
 ```
 
 Or, for a working example
 
 ```rust
 use serde::{Deserialize, Serialize};
-use serde_describe::{Schema, SelfDescribed};
+use serde_describe::SelfDescribed;
 
 // Define a type that non-self-describing formats would generally struggle
 // with, using skipped fields and untagged unions.
