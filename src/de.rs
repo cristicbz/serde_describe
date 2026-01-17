@@ -239,8 +239,50 @@ where
     where
         VisitorT: serde::de::Visitor<'de>,
     {
-        SchemaStructDeserializer::seed(self.schema, field_names, skip_list, field_types, visitor)?
+        let schema = self.schema;
+        let field_names = schema
+            .field_name_list(field_names)
+            .map_err(DeserializerT::Error::custom)?;
+        let field_types = schema
+            .node_list(field_types)
+            .map_err(DeserializerT::Error::custom)?;
+        let skip_list = schema
+            .member_list(skip_list)
+            .map_err(DeserializerT::Error::custom)?;
+
+        if field_names.len() != field_types.len() {
+            return Err(DeserializerT::Error::custom(
+                "bad schema: struct field name length and type length mismatch",
+            ));
+        }
+
+        if skip_list.is_empty() {
+            SchemaStructDeserializer {
+                schema,
+                field_names,
+                field_types,
+                skipper: NoSkipList,
+                next_value_schema: None,
+                inner: visitor,
+            }
             .deserialize(self.inner)
+        } else {
+            ChunkedEnum::deserializable(skip_list.len(), move |discriminant| {
+                SchemaStructDeserializer {
+                    schema,
+                    field_names,
+                    field_types,
+                    skipper: DiscriminantSkipper {
+                        skip_list,
+                        discriminant,
+                        i_field: 0,
+                    },
+                    next_value_schema: None,
+                    inner: visitor,
+                }
+            })?
+            .deserialize(self.inner)
+        }
     }
 
     #[inline]
@@ -253,11 +295,11 @@ where
         CallT: DeferredDeserialize<'de>,
     {
         match self.node {
+            actual if condition(actual) => call.call(self.inner),
             SchemaNode::Union(variants) => self.deserialize_union(variants, call),
             SchemaNode::OptionSome(inner) | SchemaNode::NewtypeStruct(_, inner) => {
                 call.call(self.forward(inner)?)
             }
-            actual if condition(actual) => call.call(self.inner),
             _ => self.invalid_type_error(&call),
         }
     }
@@ -298,11 +340,6 @@ where
         }
 
         match self.node {
-            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
-            SchemaNode::OptionSome(inner)
-            | SchemaNode::NewtypeStruct(_, inner)
-            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
-
             SchemaNode::I8 => number_conversion!(i8, visit_i8, Signed),
             SchemaNode::I16 => number_conversion!(i16, visit_i16, Signed),
             SchemaNode::I32 => number_conversion!(i32, visit_i32, Signed),
@@ -321,6 +358,11 @@ where
 
             SchemaNode::F32 => number_conversion!(f32, visit_f32, Float),
             SchemaNode::F64 => number_conversion!(f64, visit_f64, Float),
+
+            SchemaNode::Union(variants) => self.deserialize_union(variants, call),
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
 
             _ => self.invalid_type_error(&call),
         }
@@ -557,14 +599,14 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
-            SchemaNode::Union(variants) => {
-                self.deserialize_union(variants, deferred::deserialize_option { visitor })
-            }
             SchemaNode::OptionNone => self
                 .inner
                 .deserialize_unit(IgnoredAny)
                 .and_then(|_| visitor.visit_none()),
             SchemaNode::OptionSome(inner) => visitor.visit_some(self.forward(inner)?),
+            SchemaNode::Union(variants) => {
+                self.deserialize_union(variants, deferred::deserialize_option { visitor })
+            }
             _ => visitor.visit_some(self),
         }
     }
@@ -589,16 +631,19 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
+            SchemaNode::NewtypeStruct(_, inner) => {
+                visitor.visit_newtype_struct(self.forward(inner)?)
+            }
             SchemaNode::Union(variants) => self.deserialize_union(
                 variants,
                 deferred::deserialize_newtype_struct { name, visitor },
             ),
+            SchemaNode::NewtypeVariant(_, _, inner) => {
+                visitor.visit_newtype_struct(self.forward(inner)?)
+            }
             SchemaNode::OptionSome(inner) => self
                 .forward(inner)?
                 .deserialize_newtype_struct(name, visitor),
-            SchemaNode::NewtypeStruct(_, inner) | SchemaNode::NewtypeVariant(_, _, inner) => {
-                visitor.visit_newtype_struct(self.forward(inner)?)
-            }
             _ => visitor.visit_newtype_struct(self),
         }
     }
@@ -608,20 +653,21 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
+            SchemaNode::Sequence(item) => self.do_deserialize_seq(item, visitor),
             SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_seq { visitor })
+            }
+
+            SchemaNode::Tuple(field_types)
+            | SchemaNode::TupleStruct(_, field_types)
+            | SchemaNode::TupleVariant(_, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
             }
 
             SchemaNode::NewtypeStruct(_, inner)
             | SchemaNode::NewtypeVariant(_, _, inner)
             | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_seq(visitor),
 
-            SchemaNode::Sequence(item) => self.do_deserialize_seq(item, visitor),
-            SchemaNode::Tuple(field_types)
-            | SchemaNode::TupleStruct(_, field_types)
-            | SchemaNode::TupleVariant(_, _, field_types) => {
-                self.do_deserialize_tuple(field_types, visitor)
-            }
             _ => self.invalid_type_error(&visitor),
         }
     }
@@ -631,19 +677,20 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
+            SchemaNode::Tuple(field_types) => self.do_deserialize_tuple(field_types, visitor),
+
             SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_tuple { len, visitor })
+            }
+
+            SchemaNode::TupleStruct(_, field_types)
+            | SchemaNode::TupleVariant(_, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
             }
 
             SchemaNode::NewtypeStruct(_, inner)
             | SchemaNode::NewtypeVariant(_, _, inner)
             | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_tuple(len, visitor),
-
-            SchemaNode::Tuple(field_types)
-            | SchemaNode::TupleStruct(_, field_types)
-            | SchemaNode::TupleVariant(_, _, field_types) => {
-                self.do_deserialize_tuple(field_types, visitor)
-            }
 
             _ => self.invalid_type_error(&visitor),
         }
@@ -658,7 +705,24 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        self.deserialize_tuple(len, visitor)
+        match self.node {
+            SchemaNode::TupleStruct(_, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
+            }
+            SchemaNode::Union(variants) => {
+                self.deserialize_union(variants, deferred::deserialize_tuple { len, visitor })
+            }
+
+            SchemaNode::Tuple(field_types) | SchemaNode::TupleVariant(_, _, field_types) => {
+                self.do_deserialize_tuple(field_types, visitor)
+            }
+
+            SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner)
+            | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_tuple(len, visitor),
+
+            _ => self.invalid_type_error(&visitor),
+        }
     }
 
     fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -666,6 +730,8 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
+            SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
+
             SchemaNode::Union(variants) => {
                 self.deserialize_union(variants, deferred::deserialize_map { visitor })
             }
@@ -674,7 +740,6 @@ where
             | SchemaNode::NewtypeVariant(_, _, inner)
             | SchemaNode::OptionSome(inner) => self.forward(inner)?.deserialize_map(visitor),
 
-            SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
             SchemaNode::Struct(_, field_names, skip_list, field_types)
             | SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
                 self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
@@ -694,6 +759,10 @@ where
         V: serde::de::Visitor<'de>,
     {
         match self.node {
+            SchemaNode::Struct(_, field_names, skip_list, field_types) => {
+                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
+            }
+
             SchemaNode::Union(variants) => self.deserialize_union(
                 variants,
                 deferred::deserialize_struct {
@@ -703,16 +772,16 @@ where
                 },
             ),
 
+            SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
+                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
+            }
+
             SchemaNode::NewtypeStruct(_, inner)
             | SchemaNode::NewtypeVariant(_, _, inner)
             | SchemaNode::OptionSome(inner) => self
                 .forward(inner)?
                 .deserialize_struct(name, fields, visitor),
 
-            SchemaNode::Struct(_, field_names, skip_list, field_types)
-            | SchemaNode::StructVariant(_, _, field_names, skip_list, field_types) => {
-                self.do_deserialize_struct(field_names, skip_list, field_types, visitor)
-            }
             SchemaNode::Map(key, value) => self.do_deserialize_map(key, value, visitor),
 
             _ => self.invalid_type_error(&visitor),
@@ -888,6 +957,10 @@ where
             inner: seed,
         })
     }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
 }
 
 pub struct SchemaMapDeserializer<'schema, InnerT> {
@@ -973,6 +1046,10 @@ where
             },
         )
     }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
 }
 
 pub struct SchemaTupleDeserializer<'schema, InnerT> {
@@ -1023,59 +1100,77 @@ where
             Ok(None)
         }
     }
-}
 
-pub struct SchemaStructDeserializer<'schema, InnerT> {
-    schema: &'schema Schema,
-    field_names: &'schema [FieldNameIndex],
-    field_types: &'schema [SchemaNodeIndex],
-    skip_list: &'schema [MemberIndex],
-    discriminant: u64,
-    i_field: usize,
-    next_value_schema: Option<SchemaNode>,
-    inner: InnerT,
-}
-
-impl<'de, 'schema, InnerT> SchemaStructDeserializer<'schema, InnerT>
-where
-    InnerT: serde::de::Visitor<'de>,
-{
-    pub fn seed<ErrorT>(
-        schema: &'schema Schema,
-        field_names: FieldNameListIndex,
-        skip_list: MemberListIndex,
-        field_types: SchemaNodeListIndex,
-        inner: InnerT,
-    ) -> Result<impl DeserializeSeed<'de, Value = InnerT::Value>, ErrorT>
-    where
-        ErrorT: serde::de::Error,
-    {
-        let field_names = schema
-            .field_name_list(field_names)
-            .map_err(ErrorT::custom)?;
-        let field_types = schema.node_list(field_types).map_err(ErrorT::custom)?;
-        let skip_list = schema.member_list(skip_list).map_err(ErrorT::custom)?;
-
-        if field_names.len() != field_types.len() {
-            return Err(ErrorT::custom(
-                "bad schema: struct field name length and type length mismatch",
-            ));
-        }
-
-        ChunkedEnum::deserializable(skip_list.len(), move |discriminant| Self {
-            schema,
-            field_names,
-            field_types,
-            skip_list,
-            discriminant,
-            i_field: 0,
-            next_value_schema: None,
-            inner,
-        })
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.items.len())
     }
 }
 
-impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
+pub(crate) trait ShouldSkipField {
+    fn num_skipped(&self) -> usize;
+    fn should_skip_field(&mut self) -> bool;
+}
+
+struct NoSkipList;
+
+impl ShouldSkipField for NoSkipList {
+    #[inline]
+    fn num_skipped(&self) -> usize {
+        0
+    }
+
+    #[inline]
+    fn should_skip_field(&mut self) -> bool {
+        false
+    }
+}
+
+struct DiscriminantSkipper<'schema> {
+    skip_list: &'schema [MemberIndex],
+    discriminant: u64,
+    i_field: u32,
+}
+
+impl ShouldSkipField for DiscriminantSkipper<'_> {
+    #[inline]
+    fn num_skipped(&self) -> usize {
+        self.skip_list.len()
+            - usize::try_from(self.discriminant.count_ones())
+                .expect("usize needs to be at least 32 bits")
+    }
+
+    #[inline]
+    fn should_skip_field(&mut self) -> bool {
+        // Skip fields marked as such in the variant.
+        if let Some(&i_skip_field) = self.skip_list.first() {
+            let i_field = self.i_field;
+            self.i_field += 1;
+            if u32::from(i_skip_field) == i_field {
+                let skipped = (self.discriminant & 1) == 0;
+                self.discriminant >>= 1;
+                self.skip_list.split_off_first();
+                if skipped {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+pub struct SchemaStructDeserializer<'schema, SkipFieldT, InnerT> {
+    schema: &'schema Schema,
+    field_names: &'schema [FieldNameIndex],
+    field_types: &'schema [SchemaNodeIndex],
+    next_value_schema: Option<SchemaNode>,
+    skipper: SkipFieldT,
+    inner: InnerT,
+}
+
+impl<'schema, SkipFieldT, InnerT> SchemaStructDeserializer<'schema, SkipFieldT, InnerT>
+where
+    SkipFieldT: ShouldSkipField,
+{
     fn next<ErrorT>(&mut self) -> Result<Option<(&'schema str, SchemaNode)>, ErrorT>
     where
         ErrorT: serde::de::Error,
@@ -1091,21 +1186,7 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
             };
 
             // Skip fields marked as such in the variant.
-            if let Some(&i_skip_field) = self.skip_list.first() {
-                let i_field = self.i_field;
-                self.i_field += 1;
-                if usize::from(i_skip_field) == i_field {
-                    let skipped = (self.discriminant & 1) == 0;
-                    self.discriminant >>= 1;
-                    self.skip_list.split_off_first();
-                    if skipped {
-                        continue;
-                    }
-                }
-            }
-
-            // Skip Union([]) fields.
-            if node_index.is_empty() {
+            if self.skipper.should_skip_field() || node_index.is_empty() {
                 continue;
             }
 
@@ -1117,9 +1198,11 @@ impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
     }
 }
 
-impl<'schema, 'de, VisitorT> DeserializeSeed<'de> for SchemaStructDeserializer<'schema, VisitorT>
+impl<'schema, 'de, SkipFieldT, VisitorT> DeserializeSeed<'de>
+    for SchemaStructDeserializer<'schema, SkipFieldT, VisitorT>
 where
     VisitorT: serde::de::Visitor<'de>,
+    SkipFieldT: ShouldSkipField,
 {
     type Value = VisitorT::Value;
 
@@ -1130,9 +1213,7 @@ where
         let length = self.field_names.len()
             // Discount fields that are present in the `skip_list` and don't have a bit set in
             // the presence variant.
-            + usize::try_from(self.discriminant.count_ones())
-                .expect("usize needs to be at least 32 bits")
-            - self.skip_list.len()
+            - self.skipper.num_skipped()
             // Fields that are ALWAYS skipped are not present in `skip_list`, instead
             // they're typed as `Union[]`, the bottom type. We need to subtract these
             // as well.
@@ -1145,9 +1226,11 @@ where
     }
 }
 
-impl<'schema, 'de, VisitorT> serde::de::Visitor<'de> for SchemaStructDeserializer<'schema, VisitorT>
+impl<'schema, 'de, SkipFieldT, VisitorT> serde::de::Visitor<'de>
+    for SchemaStructDeserializer<'schema, SkipFieldT, VisitorT>
 where
     VisitorT: serde::de::Visitor<'de>,
+    SkipFieldT: ShouldSkipField,
 {
     type Value = VisitorT::Value;
 
@@ -1163,18 +1246,18 @@ where
             schema: self.schema,
             field_names: self.field_names,
             field_types: self.field_types,
-            skip_list: self.skip_list,
-            discriminant: self.discriminant,
-            i_field: self.i_field,
+            skipper: self.skipper,
             next_value_schema: self.next_value_schema,
             inner: seq,
         })
     }
 }
 
-impl<'schema, 'de, SeqAccessT> MapAccess<'de> for SchemaStructDeserializer<'schema, SeqAccessT>
+impl<'schema, 'de, SkipFieldT, SeqAccessT> MapAccess<'de>
+    for SchemaStructDeserializer<'schema, SkipFieldT, SeqAccessT>
 where
     SeqAccessT: SeqAccess<'de>,
+    SkipFieldT: ShouldSkipField,
 {
     type Error = SeqAccessT::Error;
 
