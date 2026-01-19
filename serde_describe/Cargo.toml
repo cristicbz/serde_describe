@@ -1,0 +1,23 @@
+[package]
+name = "serde_describe"
+version.workspace = true
+edition = "2024"
+description = "Make non-self-describing serde formats behave like they're self-describing."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cristicbz/serde_describe"
+authors = ["Cristi Cobzarenco <cristi.cobzarenco@gmail.com>"]
+categories = ["encoding"]
+keywords = ["serde_describe", "serde", "serialization", "self-describing", "format"]
+rust-version = "1.88"
+
+[dependencies]
+indexmap.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+bitcode.workspace = true
+maplit.workspace = true
+postcard.workspace = true
+ron.workspace = true
+serde_bytes.workspace = true
