@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde::de::DeserializeSeed;
 use serde_describe::SchemaBuilder;
-use serde_describe_benchmark_suite::{run_matrix, Dataset, Format, GithubEvents};
+use serde_describe_benchmark_suite::{Dataset, Format, GithubEvents, run_matrix};
 use std::hint::black_box;
 
 fn benchmark_format_dataset<FormatT: Format, DatasetT: Dataset>(

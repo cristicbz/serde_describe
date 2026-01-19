@@ -1,4 +1,4 @@
-use serde_describe_benchmark_suite::{run_matrix, Dataset, Format};
+use serde_describe_benchmark_suite::{Dataset, Format, run_matrix};
 use zstd::encode_all;
 
 fn format_dataset_sizes<FormatT, DatasetT>(format: &FormatT, dataset: &DatasetT)

@@ -87,5 +87,8 @@ jobs:
 
     - name: Run doctests
       run: |
-        cargo --locked test --doc
+        cargo --locked test --all --doc
 
+    - name: Run cargo benchmark sizes
+      run: |
+        cargo --locked run benchmark_sizes
