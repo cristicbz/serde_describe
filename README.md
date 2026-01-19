@@ -25,7 +25,26 @@ let SelfDescribed(roundtripped): SelfDescribed<Original> =
     bitcode::deserialize(&bytes)?;
 ```
 
-Or, for a working example
+## Why?
+
+Non-self-describing formats are generally faster and more compact than their
+self-describing counterparts. In exchange, however, they lose out on a really
+important feature: **schema evolution**.
+
+When saving data using e.g. `serde_json`, you can later deserialize it using a
+different type defintion than the one used when serializing it. In particular,
+you can:
+  1. Re-order fields & variants.
+  2. Add fields & variants with `#[serde(default)]` and `#[serde(skip_serializing_if)]`.
+  3. Rename and alias fields & variants for backwards compatibility.
+  4. Change field types by adding and remove certain wrappers like `Option<>` and newtypes.
+  5. Change primitive field types in ways that make sense: in-range integer types, integer to float etc.
+  6. Change other field types backwards-compatibly, using `#[serde(untagged)]`, use `deserialize_any`
+     or [`serde_this_or_that`](https://docs.rs/serde-this-or-that).
+
+Non-self-describing formats break if you do any of these things. This crate is
+a middle-ground, letting you recover all of these features, while not losing out
+on all the benefits of your favourite non-self-describing format. 
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -70,16 +89,27 @@ assert_eq!(roundtripped, original);
 # Ok::<_, Box<dyn std::error::Error>>(())
 ```
 
-## Trade-offs
-At a high level, the library prioritizes deserialization speed and size on the
-wire at the expense of serialization speed.
+See [the example on
+`SelfDescribed`](https://docs.rs/serde_describe/latest/serde_describe/struct.SelfDescribed.html#example)
+for a more involved case, with actual deserialization under a different type.
 
-* **Deserialization Speed**. Should only introduce a small amount of overhead
-  compared to the underlying format. The only additional operations performed
-  are validation and dispatching based on a relatively small, cache-friendly
-  schema object. In addition to the schema object itself, the only other data
-  the wrapper adds is discriminants to tag dynamically shaped data (enums,
-  tagged or otherwise, and structs with skipped fields).
+## Trade-offs
+At a high level, the library prioritizes serde compatibility, deserialization
+speed and size on the wire at the expense of serialization speed.
+
+* **Serde compatibility**. It is possible to do a better job at schema
+  inference than this crate does if types could be decorated with additional
+  custom `derive` attributes. However, a lot of the rust ecosystem already
+  derives `serde` types, making this crate much easier to plug n' play.
+
+* **Deserialization Speed**. Should only introduce a minimal amount of overhead
+  compared to the underlying format. The main, unavoidable, cost comes from no
+  longer dispatching on field and variant indices, instead using their names.
+  Otherwise, the only additional operations performed are validation and
+  dispatching based on a relatively small, cache-friendly schema object. In
+  addition to the schema object itself, the only other data the wrapper adds is
+  discriminants to tag dynamically shaped data (enums, tagged or otherwise, and
+  structs with skipped fields). 
 
 * **Size**. Given a compact underlying format, the `SelfDescribed`
   representation should end up more compact than typical self-describing
@@ -93,10 +123,25 @@ wire at the expense of serialization speed.
   optimization passes are performed to keep the schema size small (and not grow
   unbounded with the input data).
 
-Note that these goals are, at this point, mostly a statement of intent and
-reflect only high-level architectural choices. On the nuts and bolts of the
-implementation, the crate hasn't gone through extensive profiling and
-optimization yet.
+In not-super-extensive benchmarks, as a rule of thumb, you can expect
+`serde_describe` + `postcard` to beat other self-describing binary formats, but
+have significant overhead compared to bare `postcard`.
+
+Roughly, compared to bare `postcard`:
+  1. Results in a few hundred bytes of uncompressed overhead (or 2% for the
+     given datasets, though as explained this should be sub-linear).
+  2. In zstd-compressed data, the overhead is about halved.
+  3. Serialization speed is around 10x slower.
+  4. Deserialization speed is around 1.5-2x slower.
+
+Compared to a binary self-describing format like `serde_cbor`
+  1. ~30-50% smaller objects uncompressed.
+  1. ~20% smaller objects zstd-compressed.
+  2. Deserialization speed is 10-20% faster.
+
+Benchmarks can be run with criterion in `serde_describe_benchmark_suite` with
+criterion for speed and `cargo run benchmark_sizes` for sizes. There is still a
+lot of room for improvement optimization-wise.
 
 ## Current limitations
 The crate's current implementation has a few limitations. None of these are
