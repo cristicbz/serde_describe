@@ -1,10 +1,3 @@
-use serde::Serialize;
-use std::{
-    collections::HashSet,
-    fmt::{Display, Write},
-};
-use thiserror::Error;
-
 use crate::{
     SchemaBuilder, TraceError,
     indices::{
@@ -15,6 +8,11 @@ use crate::{
         NoSuchFieldListError, NoSuchFieldNameError, NoSuchFieldNameListError, NoSuchNodeListError,
         NoSuchSchemaError, NoSuchTypeNameError, NoSuchVariantNameError, Schema, SchemaNode,
     },
+};
+use serde::Serialize;
+use std::{
+    collections::HashSet,
+    fmt::{Display, Write},
 };
 
 impl std::fmt::Display for Schema {
@@ -252,31 +250,103 @@ impl Schema {
     }
 }
 
-#[derive(Clone, Copy, Debug, Error)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum DumpError {
-    #[error("dump error: {0}")]
-    FieldName(#[from] NoSuchFieldNameError),
+    FieldName(NoSuchFieldNameError),
+    TypeName(NoSuchTypeNameError),
+    VariantName(NoSuchVariantNameError),
+    NameList(NoSuchFieldNameListError),
+    Schema(NoSuchSchemaError),
+    SchemaList(NoSuchNodeListError),
+    FieldList(NoSuchFieldListError),
+    Fmt(std::fmt::Error),
+}
 
-    #[error("dump error: {0}")]
-    TypeName(#[from] NoSuchTypeNameError),
+impl std::fmt::Display for DumpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fmt(error) => write!(f, "dump formatting error: {error}"),
+            Self::FieldName(error) => write!(f, "dump error: {error}"),
+            Self::TypeName(error) => write!(f, "dump error: {error}"),
+            Self::VariantName(error) => write!(f, "dump error: {error}"),
+            Self::NameList(error) => write!(f, "dump error: {error}"),
+            Self::Schema(error) => write!(f, "dump error: {error}"),
+            Self::SchemaList(error) => write!(f, "dump error: {error}"),
+            Self::FieldList(error) => write!(f, "dump error: {error}"),
+        }
+    }
+}
 
-    #[error("dump error: {0}")]
-    VariantName(#[from] NoSuchVariantNameError),
+impl std::error::Error for DumpError {
+    #[inline]
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Fmt(error) => error,
+            Self::FieldName(error) => error,
+            Self::TypeName(error) => error,
+            Self::VariantName(error) => error,
+            Self::NameList(error) => error,
+            Self::Schema(error) => error,
+            Self::SchemaList(error) => error,
+            Self::FieldList(error) => error,
+        })
+    }
+}
 
-    #[error("dump error: {0}")]
-    NameList(#[from] NoSuchFieldNameListError),
+impl From<NoSuchFieldNameError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchFieldNameError) -> Self {
+        Self::FieldName(value)
+    }
+}
 
-    #[error("dump error: {0}")]
-    Schema(#[from] NoSuchSchemaError),
+impl From<NoSuchTypeNameError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchTypeNameError) -> Self {
+        Self::TypeName(value)
+    }
+}
 
-    #[error("dump error: {0}")]
-    SchemaList(#[from] NoSuchNodeListError),
+impl From<NoSuchVariantNameError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchVariantNameError) -> Self {
+        Self::VariantName(value)
+    }
+}
 
-    #[error("dump error: {0}")]
-    FieldList(#[from] NoSuchFieldListError),
+impl From<NoSuchFieldNameListError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchFieldNameListError) -> Self {
+        Self::NameList(value)
+    }
+}
 
-    #[error("dump formatting error: {0}")]
-    Fmt(#[from] std::fmt::Error),
+impl From<NoSuchSchemaError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchSchemaError) -> Self {
+        Self::Schema(value)
+    }
+}
+
+impl From<NoSuchNodeListError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchNodeListError) -> Self {
+        Self::SchemaList(value)
+    }
+}
+
+impl From<NoSuchFieldListError> for DumpError {
+    #[inline]
+    fn from(value: NoSuchFieldListError) -> Self {
+        Self::FieldList(value)
+    }
+}
+
+impl From<std::fmt::Error> for DumpError {
+    #[inline]
+    fn from(value: std::fmt::Error) -> Self {
+        Self::Fmt(value)
+    }
 }
 
 struct DumpContext {

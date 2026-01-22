@@ -21,8 +21,8 @@ becomes
 
 ```rust,ignore
 let bytes = bitcode::serialize(&SelfDescribed(&original))?;
-let SelfDescribed(roundtripped): SelfDescribed<Original> =
-    bitcode::deserialize(&bytes)?;
+let SelfDescribed(roundtripped) =
+    bitcode::deserialize::<SelfDescribed<Original>>(&bytes)?;
 ```
 
 ## Why?
@@ -32,12 +32,12 @@ self-describing counterparts. In exchange, however, they lose out on a really
 important feature: **schema evolution**.
 
 When saving data using e.g. `serde_json`, you can later deserialize it using a
-different type defintion than the one used when serializing it. In particular,
+different type definition than the one used when serializing it. In particular,
 you can:
   1. Re-order fields & variants.
   2. Add fields & variants with `#[serde(default)]` and `#[serde(skip_serializing_if)]`.
   3. Rename and alias fields & variants for backwards compatibility.
-  4. Change field types by adding and remove certain wrappers like `Option<>` and newtypes.
+  4. Change field types by adding and removing certain wrappers like `Option<>` and newtypes.
   5. Change primitive field types in ways that make sense: in-range integer types, integer to float etc.
   6. Change other field types backwards-compatibly, using `#[serde(untagged)]`, use `deserialize_any`
      or [`serde_this_or_that`](https://docs.rs/serde-this-or-that).
@@ -100,7 +100,7 @@ speed and size on the wire at the expense of serialization speed.
 * **Serde compatibility**. It is possible to do a better job at schema
   inference than this crate does if types could be decorated with additional
   custom `derive` attributes. However, a lot of the rust ecosystem already
-  derives `serde` types, making this crate much easier to plug n' play.
+  derives `serde` types, making this crate much easier to drop-in.
 
 * **Deserialization Speed**. Should only introduce a minimal amount of overhead
   compared to the underlying format. The main, unavoidable, cost comes from no
@@ -129,19 +129,19 @@ you can expect `serde_describe` + `postcard` to beat other self-describing
 binary formats, but have significant deserialization speed overhead compared to
 bare `postcard`. Roughly:
   1. A few hundred bytes of uncompressed overhead, or ~5% for the given
-     datasets, though this should be amortize.
-  3. Serialization speed is around 30x slower (lol).
-  4. Deserialization speed is around 1.5-2x slower.
+     datasets, though this should be amortized.
+  2. Serialization speed is around 30x slower (lol).
+  3. Deserialization speed is around 1.5-2x slower.
 
 Compared to a binary self-describing format like `serde_cbor`
   1. ~50-150% smaller objects uncompressed.
-  1. ~20% smaller objects zstd-compressed.
-  2. Deserialization speed is 10-20% faster.
+  2. ~20% smaller objects zstd-compressed.
+  3. Deserialization speed is 10-20% faster.
 
 Benchmarks can be run in `serde_describe_benchmark_suite` with criterion for
 speed and `cargo run benchmark_sizes` for sizes. There is still a lot of room
 for improvement both in benchmark methodology, and in optimizations both for
-speed and schema size.
+speed and schema size (as this dominates the space overhead).
 
 ## Current limitations
 The crate's current implementation has a few limitations. None of these are
@@ -154,6 +154,21 @@ backwards-compatibly if there is sufficient demand / motivation to do so.
   any given trace, appear as both present and absent. Fields that are always
   present or always absent (irrespective of their
   `#[serde(skip_serializing_if)]` attributes) do not count towards this limit.
+* **No `no_std` support.** could probably be added using
+  [heapless](https://docs.rs/heapless).
+* **MSRV** is recent. This is because I like using new features; if anyone has
+  a requirement for an older MSRV, I'm easily persuadable.
+* **Untrusted input**. The crate `forbid`-s unsafe, and avoids input-dependent
+  panics input, but DoS protections are left to the underlying format which
+  should limit array sizes, maximum depth etc. It would be possible (and maybe
+  desirable) for `serde_describe` to do this itself.
+
+### Stability
+
+While pre-1.0 the format will change between `0.x` to `0.y` versions. Post 1.0,
+the plan is to support the wire format practically forever, even across major
+versions. Components are in place to do this already, but the burden to do so
+at this point doesn't seem worth it.
 
 ## Advanced usage: external schema
 
@@ -260,7 +275,7 @@ implementation of the library.
 
 Serializing anything with `serde_describe` is a two-pass process
 (`SelfDescribed` simply does both of these two phases for you)
- 1. An serializer runs on the given value producing a `Trace` and a `Schema`.
+ 1. A serializer runs on the given value producing a `Trace` and a `Schema`.
  2. The underlying serializer is used to save the pair of `(schema,
     transform(schema, trace))`.
 
@@ -277,10 +292,12 @@ made on the internal serializer (`serialize_u32`, `serialize_struct`,
 `serialize_struct(field_name, ...)` etc).
 
 The upside of using this intermediate representation is that it side-steps any
-risks of non-deterministic serialization and its structure is chosen such that
-matching back to the `Schema` later is simpler. The downside is that it
-potentially doubles the amount of memory required during serialization, and it
-is almost certainly slower than serializing the same type again would be.
+risks of non-deterministic serialization (the same type resulting in two
+different---potentially equivalent---sequences of `Serializer` calls if called
+twice) and its structure is chosen such that matching back to the `Schema`
+later is simpler. The downside is that it potentially doubles the amount of
+memory required during serialization, and it is almost certainly slower than
+serializing the same type again would be.
 
 ### Schema
 The `schema` contains interned type, field and variant names, as well as a
@@ -449,7 +466,9 @@ that are supported by non-self-describing formats. In particular:
  5. Discriminants with more than 256 values are chunked into nested enums of at
     most 256 variants. This is because `serde` insists on `'static` variant
     names. So the crate ships with a static array of variants named `_00`
-    through to `_ff` which can be used any times they're required.
+    through to `_ff` which can be used any times they're required (this is
+    internal only, matching to user types happens on the original, real enum
+    variant names)
 
 This is what the RON dump of the object from the `Schema` example, annotated
 with comments and cleaned up a bit.
