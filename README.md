@@ -123,25 +123,25 @@ speed and size on the wire at the expense of serialization speed.
   optimization passes are performed to keep the schema size small (and not grow
   unbounded with the input data).
 
-In not-super-extensive benchmarks, as a rule of thumb, you can expect
-`serde_describe` + `postcard` to beat other self-describing binary formats, but
-have significant overhead compared to bare `postcard`.
-
-Roughly, compared to bare `postcard`:
-  1. Results in a few hundred bytes of uncompressed overhead (or 2% for the
-     given datasets, though as explained this should be sub-linear).
-  2. In zstd-compressed data, the overhead is about halved.
-  3. Serialization speed is around 10x slower.
+In [not-super-extensive
+benchmarks](./serde_describe_benchmark_suite/RESULTS.md), as a rule of thumb,
+you can expect `serde_describe` + `postcard` to beat other self-describing
+binary formats, but have significant deserialization speed overhead compared to
+bare `postcard`. Roughly:
+  1. A few hundred bytes of uncompressed overhead, or ~5% for the given
+     datasets, though this should be amortize.
+  3. Serialization speed is around 30x slower (lol).
   4. Deserialization speed is around 1.5-2x slower.
 
 Compared to a binary self-describing format like `serde_cbor`
-  1. ~30-50% smaller objects uncompressed.
+  1. ~50-150% smaller objects uncompressed.
   1. ~20% smaller objects zstd-compressed.
   2. Deserialization speed is 10-20% faster.
 
-Benchmarks can be run with criterion in `serde_describe_benchmark_suite` with
-criterion for speed and `cargo run benchmark_sizes` for sizes. There is still a
-lot of room for improvement optimization-wise.
+Benchmarks can be run in `serde_describe_benchmark_suite` with criterion for
+speed and `cargo run benchmark_sizes` for sizes. There is still a lot of room
+for improvement both in benchmark methodology, and in optimizations both for
+speed and schema size.
 
 ## Current limitations
 The crate's current implementation has a few limitations. None of these are
@@ -149,7 +149,7 @@ fundamental architectural constraints and they could all be removed
 backwards-compatibly if there is sufficient demand / motivation to do so.
 
 * **Objects must be < ~4GiB in size.** More precisely, the various indices used
-  internally by the library need to fit in 32-bit unsigned integers*
+  internally by the library need to fit in 32-bit unsigned integers
 * **Structs can have at most 64 skippable fields.** These are fields that, in
   any given trace, appear as both present and absent. Fields that are always
   present or always absent (irrespective of their
