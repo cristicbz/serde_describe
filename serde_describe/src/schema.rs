@@ -1,6 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeSeed};
 use std::{hash::Hash, marker::PhantomData};
-use thiserror::Error;
 
 use crate::{
     DescribedBy,
@@ -197,33 +196,82 @@ impl Schema {
     }
 }
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such field name with index {0:?}")]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchFieldNameError(FieldNameIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such type name with index {0:?}")]
+impl std::fmt::Display for NoSuchFieldNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such field name with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchFieldNameError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchTypeNameError(TypeNameIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such variant name with index {0:?}")]
+impl std::fmt::Display for NoSuchTypeNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such type name with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchTypeNameError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchVariantNameError(VariantNameIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such field name list with index {0:?}")]
+impl std::fmt::Display for NoSuchVariantNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such variant name with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchVariantNameError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchFieldNameListError(FieldNameListIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such node with index {0:?}")]
+impl std::fmt::Display for NoSuchFieldNameListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such field name list with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchFieldNameListError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchSchemaError(SchemaNodeIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such node list with index {0:?}")]
+impl std::fmt::Display for NoSuchSchemaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such node with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchSchemaError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchNodeListError(SchemaNodeListIndex);
 
-#[derive(Clone, Copy, Debug, Error)]
-#[error("no such field list with index {0:?}")]
+impl std::fmt::Display for NoSuchNodeListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such node list with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchNodeListError {}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NoSuchFieldListError(MemberListIndex);
+
+impl std::fmt::Display for NoSuchFieldListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such field list with index {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NoSuchFieldListError {}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum SchemaNode {

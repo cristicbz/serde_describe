@@ -13,7 +13,6 @@ rust-version = "1.88"
 [dependencies]
 indexmap.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 bitcode.workspace = true

@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use crate::{
     indices::{
         FieldNameIndex, FieldNameListIndex, MemberIndex, MemberListIndex, SchemaNodeIndex,
@@ -14,7 +16,6 @@ use serde::{
         SerializeTupleStruct, SerializeTupleVariant, Serializer,
     },
 };
-use thiserror::Error;
 
 /// An in-progress schema built by successive calls to [`SchemaBuilder::trace`].
 ///
@@ -144,59 +145,66 @@ impl SchemaBuilder {
 }
 
 /// Errors returned by tracing values.
-#[derive(Debug, Error)]
-#[error("tracing limits exceeded: {0}")]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum TraceError {
     /// The value is in some way too large, and built-in limits were exceeded.
     Limit(TraceLimitError),
 
     /// Custom serde serialization error.
-    #[error("custom serialization error: {0}")]
     Custom(Box<str>),
 }
 
+impl std::fmt::Display for TraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tracing error:")?;
+        match self {
+            Self::Limit(limit) => write!(f, "{limit}"),
+            Self::Custom(custom) => write!(f, "custom serialization error: {custom}"),
+        }
+    }
+}
+
 impl From<TraceLimitErrorKind> for TraceError {
+    #[inline]
     fn from(kind: TraceLimitErrorKind) -> Self {
         Self::Limit(kind.into())
     }
 }
 
+impl std::error::Error for TraceError {
+    #[inline]
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Limit(limit) => Some(limit),
+            Self::Custom(_) => None,
+        }
+    }
+}
+
 /// Errors caused by tracing a value that is in some way too large.
-#[derive(Debug, Error)]
-#[error("tracing limits exceeded: {0}")]
-pub struct TraceLimitError(#[from] TraceLimitErrorKind);
+#[derive(Debug)]
+pub struct TraceLimitError(TraceLimitErrorKind);
 
-pub(crate) const MAX_SKIPPABLE_FIELDS: usize = 64;
+impl From<TraceLimitErrorKind> for TraceLimitError {
+    #[inline]
+    fn from(value: TraceLimitErrorKind) -> Self {
+        Self(value)
+    }
+}
 
-#[derive(Debug, Error)]
-pub(crate) enum TraceLimitErrorKind {
-    #[error("too many schema nodes for u32")]
-    SchemaNodes,
+impl std::fmt::Display for TraceLimitError {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
 
-    #[error("too many schema node lists for u32")]
-    SchemaNodeLists,
-
-    #[error("too many struct members for u32")]
-    Members,
-
-    #[error("too many struct member lists for u32")]
-    MemberLists,
-
-    #[error("too many struct/variant/field names for u32")]
-    Names,
-
-    #[error("too many field lists for u32")]
-    FieldNameLists,
-
-    #[error("too many values for u32")]
-    Values,
-
-    #[error("too many variants")]
-    UnionVariants,
-
-    #[error("too many skippable fields")]
-    SkippableFields,
+impl std::error::Error for TraceLimitError {
+    #[inline]
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 impl serde::ser::Error for TraceError {
@@ -208,6 +216,40 @@ impl serde::ser::Error for TraceError {
         TraceError::Custom(msg.to_string().into())
     }
 }
+
+pub(crate) const MAX_SKIPPABLE_FIELDS: usize = 64;
+
+#[derive(Debug)]
+pub(crate) enum TraceLimitErrorKind {
+    SchemaNodes,
+    SchemaNodeLists,
+    Members,
+    MemberLists,
+    Names,
+    FieldNameLists,
+    Values,
+    UnionVariants,
+    SkippableFields,
+}
+
+impl std::fmt::Display for TraceLimitErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::SchemaNodes => "too many schema nodes for u32",
+            Self::SchemaNodeLists => "too many schema node lists for u32",
+            Self::Members => "too many struct members for u32",
+            Self::MemberLists => "too many struct member lists for u32",
+            Self::Names => "too many struct/variant/field names for u32",
+            Self::FieldNameLists => "too many field lists for u32",
+            Self::Values => "too many values for u32",
+            Self::UnionVariants => "too many variants",
+            Self::SkippableFields => "too many skippable fields",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for TraceLimitErrorKind {}
 
 pub(crate) struct RootSerializer<'a> {
     data: &'a mut Vec<u8>,
