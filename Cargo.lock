@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "serde_describe"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bitcode",
  "indexmap",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "serde_describe_benchmark_suite"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bitcode",
  "chrono",
