@@ -1,11 +1,13 @@
 //! Make a non-self-describing [`serde`](https://docs.rs/serde) format (like
 //! [`bincode`](https://docs.rs/bincode2), [`bitcode`](https://docs.rs/bitcode) or
-//! [`postcard`](https://docs.rs/postcard)) behave as like a self-describing one by transparently
-//! serializing a schema alongside (or [separately from](#advanced-usage-external-schema)) the
-//! data.
+//! [`postcard`](https://docs.rs/postcard)) behave like a self-describing one by transparently
+//! serializing a schema alongside (or [separately from](crate::SchemaBuilder)) the data.
 //!
 //! The main entry point to the crate is [`SelfDescribed`]. For advanced uses [`SchemaBuilder`]
 //! and [`Schema`] may also be of interest.
+//!
+//! See the [README](https://github.com/cristicbz/serde_describe) a detailed discussion of the
+//! trade-offs involved.
 //!
 //! ```
 //! use serde::{Deserialize, Serialize};
