@@ -151,6 +151,10 @@ pub enum TraceError {
     /// The value is in some way too large, and built-in limits were exceeded.
     Limit(TraceLimitError),
 
+    /// A `Serialize` implementation serialized a different number of struct fields or tuple
+    /// elements than the length it declared.
+    LengthMismatch,
+
     /// Custom serde serialization error.
     Custom(Box<str>),
 }
@@ -160,6 +164,9 @@ impl std::fmt::Display for TraceError {
         write!(f, "tracing error: ")?;
         match self {
             Self::Limit(limit) => write!(f, "{limit}"),
+            Self::LengthMismatch => {
+                write!(f, "serialized a different number of elements than declared")
+            }
             Self::Custom(custom) => write!(f, "custom serialization error: {custom}"),
         }
     }
@@ -177,7 +184,7 @@ impl std::error::Error for TraceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Limit(limit) => Some(limit),
-            Self::Custom(_) => None,
+            Self::LengthMismatch | Self::Custom(_) => None,
         }
     }
 }
@@ -839,6 +846,7 @@ impl<'a> Serializer for RootSerializer<'a> {
         Ok(TupleSchemaBuilder {
             name: None,
             schemas: Vec::with_capacity(len),
+            length: len,
             parent: self,
         })
     }
@@ -854,6 +862,7 @@ impl<'a> Serializer for RootSerializer<'a> {
         Ok(TupleSchemaBuilder {
             name: Some(self.push_struct_name(name)?),
             schemas: Vec::with_capacity(len),
+            length: len,
             parent: self,
         })
     }
@@ -871,6 +880,7 @@ impl<'a> Serializer for RootSerializer<'a> {
         Ok(TupleSchemaBuilder {
             name: Some(self.push_variant_name(name, variant)?),
             schemas: Vec::with_capacity(len),
+            length: len,
             parent: self,
         })
     }
@@ -1001,6 +1011,7 @@ pub(crate) struct TupleSchemaBuilder<'a> {
     parent: RootSerializer<'a>,
     name: Option<TypeName>,
     schemas: Vec<SchemaBuilderNode>,
+    length: usize,
 }
 
 impl SerializeTuple for TupleSchemaBuilder<'_> {
@@ -1019,6 +1030,9 @@ impl SerializeTuple for TupleSchemaBuilder<'_> {
 
     #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
+        if self.schemas.len() != self.length {
+            return Err(TraceError::LengthMismatch);
+        }
         Ok(SchemaBuilderNode::Record {
             name: self.name,
             field_names: None,
@@ -1072,6 +1086,7 @@ pub(crate) struct StructSchemaBuilder<'a> {
     field_names: Vec<FieldNameIndex>,
     field_types: Vec<SchemaBuilderNode>,
     skipped: Vec<MemberIndex>,
+    length: usize,
 }
 
 impl<'a> StructSchemaBuilder<'a> {
@@ -1094,6 +1109,7 @@ impl<'a> StructSchemaBuilder<'a> {
             field_names: Vec::with_capacity(length),
             field_types: Vec::with_capacity(length),
             skipped: Vec::new(),
+            length,
             parent,
         })
     }
@@ -1108,6 +1124,9 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
     where
         T: ?Sized + serde::Serialize,
     {
+        if self.field_names.len() - self.skipped.len() >= self.length {
+            return Err(TraceError::LengthMismatch);
+        }
         self.reserved_field_presence = self.parent.write_field_presence(
             self.reserved_field_presence,
             MemberIndex::try_from(self.field_names.len())?,
@@ -1120,14 +1139,24 @@ impl SerializeStruct for StructSchemaBuilder<'_> {
 
     #[inline]
     fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
-        self.skipped.push(self.field_names.len().try_into()?);
+        let skipped = self.field_names.len().try_into()?;
         self.field_names.push(self.parent.intern_field_name(key)?);
         self.field_types.push(SchemaBuilderNode::default());
+        // Push to `skipped` last, so that early returns cannot break
+        // `skipped.len() <= field_names.len()`.
+        self.skipped.push(skipped);
         Ok(())
     }
 
     #[inline]
     fn end(mut self) -> Result<Self::Ok, Self::Error> {
+        // The second condition can only trigger if a `Serialize` implementation ignored an error
+        // returned by `serialize_field` and carried on, leaving names and types out of sync.
+        if self.field_names.len() - self.skipped.len() != self.length
+            || self.field_names.len() != self.field_types.len()
+        {
+            return Err(TraceError::LengthMismatch);
+        }
         let field_names = Some(
             self.parent
                 .fill_reserved_field_name_list(self.reserved_field_name_list, self.field_names)?,
