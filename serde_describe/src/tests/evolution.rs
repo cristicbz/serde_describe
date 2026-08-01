@@ -44,8 +44,9 @@ tests! {
     fn test_string_and_option_some_equal<Strict, Optional>(check_equals_two_way);
     fn test_swap_newtype_and_option_equal<NewType<Optional>, Optional<NewType>>(check_equals_two_way);
     fn test_transparent_newtypes_optionals<NewType<Optional<NewType<Optional<NewType>>>>, NewType<NewType<NewType>>>(check_equals_two_way);
+    fn test_newtype_variant_to_string_equal<NewTypeVariant, Strict>(check_equals_one_way);
+    fn test_newtype_variant_to_u32_equal<NewTypeVariant<Strict<u32>>, Strict<u32>>(check_equals_one_way, &[0u32, u32::MAX]);
 
-    fn test_newtype_variant_to_string_fail<NewTypeVariant, Strict>(check_fails_one_way);
     fn test_tuple_variant_to_string_fail<TupleVariant, Strict>(check_fails_one_way);
     fn test_struct_variant_to_string_fail<StructVariant, Strict>(check_fails_one_way);
     fn test_option_none_to_string_fails<OptionNone, Strict>(check_fails_one_way);
