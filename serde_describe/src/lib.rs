@@ -67,7 +67,7 @@ pub(crate) mod schema;
 pub(crate) mod ser;
 pub(crate) mod trace;
 
-pub use builder::{SchemaBuilder, TraceError};
+pub use builder::{SchemaBuilder, TraceError, TraceLimitError};
 pub use described::{DescribedBy, SelfDescribed};
 pub use schema::Schema;
 pub use trace::Trace;
