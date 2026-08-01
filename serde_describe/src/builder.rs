@@ -157,7 +157,7 @@ pub enum TraceError {
 
 impl std::fmt::Display for TraceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "tracing error:")?;
+        write!(f, "tracing error: ")?;
         match self {
             Self::Limit(limit) => write!(f, "{limit}"),
             Self::Custom(custom) => write!(f, "custom serialization error: {custom}"),
