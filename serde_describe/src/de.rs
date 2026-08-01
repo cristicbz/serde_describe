@@ -297,9 +297,9 @@ where
         match self.node {
             actual if condition(actual) => call.call(self.inner),
             SchemaNode::Union(variants) => self.deserialize_union(variants, call),
-            SchemaNode::OptionSome(inner) | SchemaNode::NewtypeStruct(_, inner) => {
-                call.call(self.forward(inner)?)
-            }
+            SchemaNode::OptionSome(inner)
+            | SchemaNode::NewtypeStruct(_, inner)
+            | SchemaNode::NewtypeVariant(_, _, inner) => call.call(self.forward(inner)?),
             _ => self.invalid_type_error(&call),
         }
     }
