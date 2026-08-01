@@ -1107,7 +1107,9 @@ where
 }
 
 pub(crate) trait ShouldSkipField {
-    fn num_skipped(&self) -> usize;
+    fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
+    where
+        ErrorT: serde::de::Error;
     fn should_skip_field(&mut self) -> bool;
 }
 
@@ -1115,8 +1117,11 @@ struct NoSkipList;
 
 impl ShouldSkipField for NoSkipList {
     #[inline]
-    fn num_skipped(&self) -> usize {
-        0
+    fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
+    where
+        ErrorT: serde::de::Error,
+    {
+        Ok(0)
     }
 
     #[inline]
@@ -1133,10 +1138,23 @@ struct DiscriminantSkipper<'schema> {
 
 impl ShouldSkipField for DiscriminantSkipper<'_> {
     #[inline]
-    fn num_skipped(&self) -> usize {
-        self.skip_list.len()
-            - usize::try_from(self.discriminant.count_ones())
-                .expect("usize needs to be at least 32 bits")
+    fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
+    where
+        ErrorT: serde::de::Error,
+    {
+        // Reject discriminants with more bits set than there are skippable fields.
+        self.skip_list
+            .len()
+            .checked_sub(
+                usize::try_from(self.discriminant.count_ones())
+                    .expect("usize needs to be at least 32 bits"),
+            )
+            .ok_or_else(|| {
+                ErrorT::invalid_value(
+                    Unexpected::Unsigned(self.discriminant),
+                    &"field presence discriminant",
+                )
+            })
     }
 
     #[inline]
@@ -1213,7 +1231,7 @@ where
         let length = self.field_names.len()
             // Discount fields that are present in the `skip_list` and don't have a bit set in
             // the presence variant.
-            - self.skipper.num_skipped()
+            - self.skipper.num_skipped()?
             // Fields that are ALWAYS skipped are not present in `skip_list`, instead
             // they're typed as `Union[]`, the bottom type. We need to subtract these
             // as well.
