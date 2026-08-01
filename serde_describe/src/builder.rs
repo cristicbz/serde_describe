@@ -629,7 +629,7 @@ impl SchemaBuilderNode {
                     )
                 });
                 if skippable.len() > MAX_SKIPPABLE_FIELDS {
-                    return Err(TraceError::from(TraceLimitErrorKind::SkippableFields))?;
+                    return Err(TraceError::from(TraceLimitErrorKind::SkippableFields));
                 }
                 let field_types = field_types
                     .into_iter()
