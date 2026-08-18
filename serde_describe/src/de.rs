@@ -261,7 +261,11 @@ where
                 schema,
                 field_names,
                 field_types,
-                skipper: NoSkipList,
+                skipper: FieldSkipper {
+                    skip_list,
+                    discriminant: 0,
+                    i_field: 0,
+                },
                 next_value_schema: None,
                 inner: visitor,
             }
@@ -272,7 +276,7 @@ where
                     schema,
                     field_names,
                     field_types,
-                    skipper: DiscriminantSkipper {
+                    skipper: FieldSkipper {
                         skip_list,
                         discriminant,
                         i_field: 0,
@@ -1106,37 +1110,13 @@ where
     }
 }
 
-pub(crate) trait ShouldSkipField {
-    fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
-    where
-        ErrorT: serde::de::Error;
-    fn should_skip_field(&mut self) -> bool;
-}
-
-struct NoSkipList;
-
-impl ShouldSkipField for NoSkipList {
-    #[inline]
-    fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
-    where
-        ErrorT: serde::de::Error,
-    {
-        Ok(0)
-    }
-
-    #[inline]
-    fn should_skip_field(&mut self) -> bool {
-        false
-    }
-}
-
-struct DiscriminantSkipper<'schema> {
+struct FieldSkipper<'schema> {
     skip_list: &'schema [MemberIndex],
     discriminant: u64,
     i_field: u32,
 }
 
-impl ShouldSkipField for DiscriminantSkipper<'_> {
+impl FieldSkipper<'_> {
     #[inline]
     fn num_skipped<ErrorT>(&self) -> Result<usize, ErrorT>
     where
@@ -1159,7 +1139,6 @@ impl ShouldSkipField for DiscriminantSkipper<'_> {
 
     #[inline]
     fn should_skip_field(&mut self) -> bool {
-        // Skip fields marked as such in the variant.
         if let Some(&i_skip_field) = self.skip_list.first() {
             let i_field = self.i_field;
             self.i_field += 1;
@@ -1176,19 +1155,19 @@ impl ShouldSkipField for DiscriminantSkipper<'_> {
     }
 }
 
-pub struct SchemaStructDeserializer<'schema, SkipFieldT, InnerT> {
+// Keep the skip policy as data rather than a type parameter. Each distinct MapAccess type
+// monomorphizes the target visitor's (often large) `visit_map` implementation.
+pub struct SchemaStructDeserializer<'schema, InnerT> {
     schema: &'schema Schema,
     field_names: &'schema [FieldNameIndex],
     field_types: &'schema [SchemaNodeIndex],
+    skipper: FieldSkipper<'schema>,
     next_value_schema: Option<SchemaNode>,
-    skipper: SkipFieldT,
     inner: InnerT,
 }
 
-impl<'schema, SkipFieldT, InnerT> SchemaStructDeserializer<'schema, SkipFieldT, InnerT>
-where
-    SkipFieldT: ShouldSkipField,
-{
+impl<'schema, InnerT> SchemaStructDeserializer<'schema, InnerT> {
+    #[inline]
     fn next<ErrorT>(&mut self) -> Result<Option<(&'schema str, SchemaNode)>, ErrorT>
     where
         ErrorT: serde::de::Error,
@@ -1203,7 +1182,8 @@ where
                 _ => unreachable!("types & names are verified to have the same length"),
             };
 
-            // Skip fields marked as such in the variant.
+            // Skip fields marked as such in the variant. For the common case with no
+            // conditionally serialized fields, this is one predictable branch.
             if self.skipper.should_skip_field() || node_index.is_empty() {
                 continue;
             }
@@ -1216,11 +1196,9 @@ where
     }
 }
 
-impl<'schema, 'de, SkipFieldT, VisitorT> DeserializeSeed<'de>
-    for SchemaStructDeserializer<'schema, SkipFieldT, VisitorT>
+impl<'schema, 'de, VisitorT> DeserializeSeed<'de> for SchemaStructDeserializer<'schema, VisitorT>
 where
     VisitorT: serde::de::Visitor<'de>,
-    SkipFieldT: ShouldSkipField,
 {
     type Value = VisitorT::Value;
 
@@ -1244,11 +1222,9 @@ where
     }
 }
 
-impl<'schema, 'de, SkipFieldT, VisitorT> serde::de::Visitor<'de>
-    for SchemaStructDeserializer<'schema, SkipFieldT, VisitorT>
+impl<'schema, 'de, VisitorT> serde::de::Visitor<'de> for SchemaStructDeserializer<'schema, VisitorT>
 where
     VisitorT: serde::de::Visitor<'de>,
-    SkipFieldT: ShouldSkipField,
 {
     type Value = VisitorT::Value;
 
@@ -1271,11 +1247,9 @@ where
     }
 }
 
-impl<'schema, 'de, SkipFieldT, SeqAccessT> MapAccess<'de>
-    for SchemaStructDeserializer<'schema, SkipFieldT, SeqAccessT>
+impl<'schema, 'de, SeqAccessT> MapAccess<'de> for SchemaStructDeserializer<'schema, SeqAccessT>
 where
     SeqAccessT: SeqAccess<'de>,
-    SkipFieldT: ShouldSkipField,
 {
     type Error = SeqAccessT::Error;
 
